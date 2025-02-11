@@ -1,130 +1,134 @@
-
-const timeout=0;  //cambieremo poi come vorremmo per il testing
-
+const timeout = 0; // tempo (ms) tra il processamento di ogni riga
 
 const fs = require('fs').promises;
 const { MongoClient } = require('mongodb');
 
-// Parametri di connessione e database
-const mongoUrl = 'mongodb://localhost:27017/'; // Modifica se necessario
-//*********Attiva l'url sotto per te leti se devi provare il codice
-//const mongoUrl = 'mongodb://admin:password@100.111.12.33:27017'; // se non ti trova l url, verifica il servizio su docker oppure se te l ho messo giusto
-
+const mongoUrl = 'mongodb://localhost:27017/';
 const dbName = 'sensor_data';
 
-// Percorsi dei file CSV
-const filePathCO2 = 'DataCO2_Adeunis';                // File CO₂ (originale)
-const filePathTemperature = 'DataTemperature_Adeunis'; // File Temperatura
+const filePathCO2 = 'DataCO2_Adeunis';
+const filePathTemperature = 'DataTemperature_Adeunis';
 
-// Nomi delle collezioni (se vuoi in futuro inserire i dati su MongoDB)
 const collectionNameCO2 = 'co2_readings';
 const collectionNameTemperature = 'temperature_readings';
 
-// (Opzionale) Funzione di connessione a MongoDB per eventuale inserimento
-async function connectToMongo(collectionName, data) {
+// Genera una barra di avanzamento con 5 segmenti (20% ciascuno)
+const renderProgressBar = (progress) => {
+    const totalBars = 5;
+    const prog = Math.min(progress, 1);
+    const filled = Math.floor(prog * totalBars);
+    return `[${'#'.repeat(filled)}${'-'.repeat(totalBars - filled)}] ${Math.floor(prog * 100)}%`;
+};
+
+async function processFiles() {
     const client = new MongoClient(mongoUrl);
     try {
         await client.connect();
-        console.log("✅ Connesso a MongoDB!");
+        console.log("✅ Connessione a MongoDB aperta.");
         const db = client.db(dbName);
-        const collection = db.collection(collectionName);
-        console.log(`📂 Database e collezione (${collectionName}) selezionati con successo!`);
-        // Se vuoi inserire i dati, decommenta le righe seguenti:
-         const result = await collection.insertOne(data);
-         console.log("📥 Dati inseriti con successo:", result.insertedId);
-    } catch (err) {
-        console.error("❌ Errore nella connessione a MongoDB:", err);
-    } finally {
-        await client.close();
-        console.log("🔌 Connessione chiusa.");
-    }
-}
+        const co2Collection = db.collection(collectionNameCO2);
+        const tempCollection = db.collection(collectionNameTemperature);
 
-// Funzione che legge entrambi i file e, ogni 1 secondo, preleva una riga da ciascuno e la stampa
-async function processFiles() {
-    try {
-        // Leggiamo i due file in parallelo
-        const [co2Data, temperatureData] = await Promise.all([
+        // Lettura in parallelo dei due file
+        const [co2Data, tempData] = await Promise.all([
             fs.readFile(filePathCO2, 'utf8'),
             fs.readFile(filePathTemperature, 'utf8')
         ]);
 
-        // Suddividiamo i file in array di righe e filtriamo eventuali righe vuote
         const co2Lines = co2Data.split('\n').filter(line => line.trim() !== '');
-        const temperatureLines = temperatureData.split('\n').filter(line => line.trim() !== '');
+        const tempLines = tempData.split('\n').filter(line => line.trim() !== '');
+        console.log(`Simulazione rilevazione: ${co2Lines.length} righe CO₂ e ${tempLines.length} righe Temperatura.`);
 
-        // Se i file hanno numeri di righe differenti, usiamo il minimo fra i due
-        let index = 0;
-        const maxIndex = Math.min(co2Lines.length, temperatureLines.length);
+        // Avvio del timer
+        const startTime = Date.now();
 
-        console.log(`Inizio elaborazione: verranno processate ${maxIndex} righe per ciascun file (ogni ${timeout/1000} secondi).`);
+        let indexCO2 = 0, indexTemp = 0;
+        let thresholdCO2 = 0.2, thresholdTemp = 0.2;
 
-        const intervalId = setInterval(() => {
-            if (index >= maxIndex) {
-                clearInterval(intervalId);
-                console.log("Fine dei dati.");
-                return;
+        const intervalId = setInterval(async () => {
+            // Elaborazione del file CO₂ (se ancora disponibile)
+            if (indexCO2 < co2Lines.length) {
+                const values = co2Lines[indexCO2].split('\t').map(v => v.trim());
+                const dataObj = {
+                    timestamp:     values[0],
+                    date:          values[1],
+                    zone2_window1: values[2],
+                    zone2_window2: values[3],
+                    meeting2:      values[4],
+                    zone3_window:  values[5],
+                    meeting1:      values[6],
+                    meeting3:      values[7],
+                    meeting4:      values[8],
+                    zone3_back:    values[9],
+                    break_room:    values[10],
+                    zone2_back:    values[11]
+                };
+
+                try {
+                    await co2Collection.insertOne(dataObj);
+                } catch (e) {
+                    console.error("Errore inserimento CO₂:", e);
+                }
+                indexCO2++;
+                const progress = indexCO2 / co2Lines.length;
+                if (progress >= thresholdCO2 || indexCO2 === co2Lines.length) {
+                    console.log("CO₂ progress: " + renderProgressBar(progress));
+                    thresholdCO2 += 0.2;
+                }
             }
 
-            // Elaborazione della riga del file CO₂, rimuovendo i caratteri \r
-            const co2Values = co2Lines[index]
-                .split('\t')
-                .map(item => item.replace(/\r/g, '').trim());
+            // Elaborazione del file Temperatura (se ancora disponibile)
+            if (indexTemp < tempLines.length) {
+                const values = tempLines[indexTemp].split('\t').map(v => v.trim());
+                const dataObj = {
+                    timestamp:     values[0],
+                    date:          values[1],
+                    zone2_window1: values[2],
+                    zone2_window2: values[3],
+                    meeting2:      values[4],
+                    zone3_window:  values[5],
+                    meeting1:      values[6],
+                    meeting3:      values[7],
+                    meeting4:      values[8],
+                    zone3_back:    values[9],
+                    hall2:         values[10],
+                    hall1:         values[11],
+                    upstair:       values[12],
+                    intrance:      values[13],
+                    downstair:     values[14],
+                    tech_back:     values[15],
+                    break_room:    values[16],
+                    zone2_back:    values[17]
+                };
 
-            const co2SensorData = {
-                timestamp:     co2Values[0],
-                date:          co2Values[1],
-                zone2_window1: co2Values[2],
-                zone2_window2: co2Values[3],
-                meeting2:      co2Values[4],
-                zone3_window:  co2Values[5],
-                meeting1:      co2Values[6],
-                meeting3:      co2Values[7],
-                meeting4:      co2Values[8],
-                zone3_back:    co2Values[9],
-                break_room:    co2Values[10],
-                zone2_back:    co2Values[11]
-            };
+                try {
+                    await tempCollection.insertOne(dataObj);
+                } catch (e) {
+                    console.error("Errore inserimento Temperatura:", e);
+                }
+                indexTemp++;
+                const progress = indexTemp / tempLines.length;
+                if (progress >= thresholdTemp || indexTemp === tempLines.length) {
+                    console.log("Temperatura progress: " + renderProgressBar(progress));
+                    thresholdTemp += 0.2;
+                }
+            }
 
-            // Elaborazione della riga del file Temperatura, rimuovendo i caratteri \r
-            const temperatureValues = temperatureLines[index]
-                .split('\t')
-                .map(item => item.replace(/\r/g, '').trim());
-
-            const temperatureSensorData = {
-                timestamp:     temperatureValues[0],
-                date:          temperatureValues[1],
-                zone2_window1: temperatureValues[2],
-                zone2_window2: temperatureValues[3],
-                meeting2:      temperatureValues[4],
-                zone3_window:  temperatureValues[5],
-                meeting1:      temperatureValues[6],
-                meeting3:      temperatureValues[7],
-                meeting4:      temperatureValues[8],
-                zone3_back:    temperatureValues[9],
-                hall2:         temperatureValues[10],
-                hall1:         temperatureValues[11],
-                upstair:       temperatureValues[12],
-                intrance:      temperatureValues[13],
-                downstair:     temperatureValues[14],
-                tech_back:     temperatureValues[15],
-                break_room:    temperatureValues[16],
-                zone2_back:    temperatureValues[17]
-            };
-
-            console.log(`\n--- Riga ${index + 1} ---`);
-            console.log("CO₂:", co2SensorData);
-            console.log("Temperatura:", temperatureSensorData);
-
-            // Se in futuro vuoi inserire i dati in MongoDB, puoi chiamare le funzioni:
-             connectToMongo(collectionNameCO2, co2SensorData);
-             connectToMongo(collectionNameTemperature, temperatureSensorData);
-
-            index++;
+            // Se entrambi i file sono stati completamente processati
+            if (indexCO2 >= co2Lines.length && indexTemp >= tempLines.length) {
+                clearInterval(intervalId);
+                const elapsedTime = Date.now() - startTime;
+                console.log("Elaborazione completata.");
+                console.log(`Tempo totale: ${elapsedTime/1000}s.`);
+                console.log(`Totale righe processate: [CO₂ -> ${indexCO2}], [Temperatura -> ${indexTemp}]`);
+                console.log("Chiusura connessione MongoDB.");
+                await client.close();
+            }
         }, timeout);
 
     } catch (err) {
-        console.error("❌ Errore nel leggere i file:", err);
+        console.error("Errore:", err);
+        await client.close();
     }
 }
 
