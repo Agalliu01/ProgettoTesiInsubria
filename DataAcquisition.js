@@ -1,5 +1,5 @@
 
-const timeout=3000;  //cambieremo poi come vorremmo per il testing
+const timeout=0;  //cambieremo poi come vorremmo per il testing
 
 
 const fs = require('fs').promises;
@@ -30,8 +30,8 @@ async function connectToMongo(collectionName, data) {
         const collection = db.collection(collectionName);
         console.log(`📂 Database e collezione (${collectionName}) selezionati con successo!`);
         // Se vuoi inserire i dati, decommenta le righe seguenti:
-        // const result = await collection.insertOne(data);
-        // console.log("📥 Dati inseriti con successo:", result.insertedId);
+         const result = await collection.insertOne(data);
+         console.log("📥 Dati inseriti con successo:", result.insertedId);
     } catch (err) {
         console.error("❌ Errore nella connessione a MongoDB:", err);
     } finally {
@@ -117,8 +117,8 @@ async function processFiles() {
             console.log("Temperatura:", temperatureSensorData);
 
             // Se in futuro vuoi inserire i dati in MongoDB, puoi chiamare le funzioni:
-            // connectToMongo(collectionNameCO2, co2SensorData);
-            // connectToMongo(collectionNameTemperature, temperatureSensorData);
+             connectToMongo(collectionNameCO2, co2SensorData);
+             connectToMongo(collectionNameTemperature, temperatureSensorData);
 
             index++;
         }, timeout);
