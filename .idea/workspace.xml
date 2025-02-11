@@ -4,8 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="3b8842af-1d68-41a8-a232-438f5a264586" name="Changes" comment="Tutti i file">
-      <change afterPath="$PROJECT_DIR$/DataTemperature_Adeunis" afterDir="false" />
+    <list default="true" id="3b8842af-1d68-41a8-a232-438f5a264586" name="Changes" comment="Aggiunto il file di rilevazioni temperatura di adeunis, inoltre modificato il codice in modo tale da poter leggere entrambi i file riga per riga con un intervallo di 3 secondi circa">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/DataAcquisition.js" beforeDir="false" afterPath="$PROJECT_DIR$/DataAcquisition.js" afterDir="false" />
     </list>
@@ -55,7 +54,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1739267706595</updated>
-      <workItem from="1739267707871" duration="983000" />
+      <workItem from="1739267707871" duration="2074000" />
     </task>
     <task id="LOCAL-00001" summary="Primo">
       <option name="closed" value="true" />
@@ -73,7 +72,15 @@
       <option name="project" value="LOCAL" />
       <updated>1739269730487</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="Aggiunto il file di rilevazioni temperatura di adeunis, inoltre modificato il codice in modo tale da poter leggere entrambi i file riga per riga con un intervallo di 3 secondi circa">
+      <option name="closed" value="true" />
+      <created>1739270833138</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1739270833138</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -82,6 +89,7 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Primo" />
     <MESSAGE value="Tutti i file" />
-    <option name="LAST_COMMIT_MESSAGE" value="Tutti i file" />
+    <MESSAGE value="Aggiunto il file di rilevazioni temperatura di adeunis, inoltre modificato il codice in modo tale da poter leggere entrambi i file riga per riga con un intervallo di 3 secondi circa" />
+    <option name="LAST_COMMIT_MESSAGE" value="Aggiunto il file di rilevazioni temperatura di adeunis, inoltre modificato il codice in modo tale da poter leggere entrambi i file riga per riga con un intervallo di 3 secondi circa" />
   </component>
 </project>

@@ -1,8 +1,15 @@
+
+const timeout=3000;  //cambieremo poi come vorremmo per il testing
+
+
 const fs = require('fs').promises;
 const { MongoClient } = require('mongodb');
 
 // Parametri di connessione e database
 const mongoUrl = 'mongodb://localhost:27017/'; // Modifica se necessario
+//*********Attiva l'url sotto per te leti se devi provare il codice
+//const mongoUrl = 'mongodb://admin:password@100.111.12.33:27017'; // se non ti trova l url, verifica il servizio su docker oppure se te l ho messo giusto
+
 const dbName = 'sensor_data';
 
 // Percorsi dei file CSV
@@ -50,7 +57,7 @@ async function processFiles() {
         let index = 0;
         const maxIndex = Math.min(co2Lines.length, temperatureLines.length);
 
-        console.log(`Inizio elaborazione: verranno processate ${maxIndex} righe per ciascun file (ogni 1 secondo).`);
+        console.log(`Inizio elaborazione: verranno processate ${maxIndex} righe per ciascun file (ogni ${timeout/1000} secondi).`);
 
         const intervalId = setInterval(() => {
             if (index >= maxIndex) {
@@ -114,7 +121,7 @@ async function processFiles() {
             // connectToMongo(collectionNameTemperature, temperatureSensorData);
 
             index++;
-        }, 3000);
+        }, timeout);
 
     } catch (err) {
         console.error("❌ Errore nel leggere i file:", err);
