@@ -6,8 +6,8 @@ const { MongoClient } = require('mongodb');
 const mongoUrl = 'mongodb://localhost:27017/';
 const dbName = 'sensor_data';
 
-const filePathCO2 = 'DataCO2_Adeunis';
-const filePathTemperature = 'DataTemperature_Adeunis';
+const filePathCO2 = '../DataCO2_Adeunis';
+const filePathTemperature = '../DataTemperature_Adeunis';
 
 const collectionNameCO2 = 'co2_readings';
 const collectionNameTemperature = 'temperature_readings';
