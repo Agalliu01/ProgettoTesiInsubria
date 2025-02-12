@@ -3,7 +3,16 @@ const timeout = 0; // tempo (ms) tra il processamento di ogni riga
 const fs = require('fs').promises;
 const { MongoClient } = require('mongodb');
 
+const {
+    generateAESKey,
+    encryptWithAES,
+    encryptAESKeyWithRSA,
+    getPublicKey
+} = require('./encryption');
+
 const mongoUrl = 'mongodb://localhost:27017/';
+//const mongoUrl = 'mongodb://admin:password@100.111.12.33:27017';
+
 const dbName = 'sensor_data';
 
 const filePathCO2 = '../DataCO2_Adeunis';
@@ -45,27 +54,37 @@ async function processFiles() {
         let indexCO2 = 0, indexTemp = 0;
         let thresholdCO2 = 0.2, thresholdTemp = 0.2;
 
+        const publicKey = await getPublicKey('DataAcquisition'); // Carica la chiave pubblica RSA (con await)
+
         const intervalId = setInterval(async () => {
             // Elaborazione del file CO₂ (se ancora disponibile)
             if (indexCO2 < co2Lines.length) {
                 const values = co2Lines[indexCO2].split('\t').map(v => v.trim());
                 const dataObj = {
-                    timestamp:     values[0],
-                    date:          values[1],
+                    timestamp: values[0],
+                    date: values[1],
                     zone2_window1: values[2],
                     zone2_window2: values[3],
-                    meeting2:      values[4],
-                    zone3_window:  values[5],
-                    meeting1:      values[6],
-                    meeting3:      values[7],
-                    meeting4:      values[8],
-                    zone3_back:    values[9],
-                    break_room:    values[10],
-                    zone2_back:    values[11]
+                    meeting2: values[4],
+                    zone3_window: values[5],
+                    meeting1: values[6],
+                    meeting3: values[7],
+                    meeting4: values[8],
+                    zone3_back: values[9],
+                    break_room: values[10],
+                    zone2_back: values[11]
                 };
 
+                const aesKey = generateAESKey();
+                const { encryptedData, iv } = encryptWithAES(JSON.stringify(dataObj), aesKey);
+                const encryptedAESKey = encryptAESKeyWithRSA(aesKey, publicKey);
+
                 try {
-                    await co2Collection.insertOne(dataObj);
+                    await co2Collection.insertOne({
+                        encryptedData,
+                        iv,
+                        encryptedAESKey: encryptedAESKey.toString('hex')
+                    });
                 } catch (e) {
                     console.error("Errore inserimento CO₂:", e);
                 }
@@ -81,28 +100,36 @@ async function processFiles() {
             if (indexTemp < tempLines.length) {
                 const values = tempLines[indexTemp].split('\t').map(v => v.trim());
                 const dataObj = {
-                    timestamp:     values[0],
-                    date:          values[1],
+                    timestamp: values[0],
+                    date: values[1],
                     zone2_window1: values[2],
                     zone2_window2: values[3],
-                    meeting2:      values[4],
-                    zone3_window:  values[5],
-                    meeting1:      values[6],
-                    meeting3:      values[7],
-                    meeting4:      values[8],
-                    zone3_back:    values[9],
-                    hall2:         values[10],
-                    hall1:         values[11],
-                    upstair:       values[12],
-                    intrance:      values[13],
-                    downstair:     values[14],
-                    tech_back:     values[15],
-                    break_room:    values[16],
-                    zone2_back:    values[17]
+                    meeting2: values[4],
+                    zone3_window: values[5],
+                    meeting1: values[6],
+                    meeting3: values[7],
+                    meeting4: values[8],
+                    zone3_back: values[9],
+                    hall2: values[10],
+                    hall1: values[11],
+                    upstair: values[12],
+                    intrance: values[13],
+                    downstair: values[14],
+                    tech_back: values[15],
+                    break_room: values[16],
+                    zone2_back: values[17]
                 };
 
+                const aesKey = generateAESKey();
+                const { encryptedData, iv } = encryptWithAES(JSON.stringify(dataObj), aesKey);
+                const encryptedAESKey = encryptAESKeyWithRSA(aesKey, publicKey);
+
                 try {
-                    await tempCollection.insertOne(dataObj);
+                    await tempCollection.insertOne({
+                        encryptedData,
+                        iv,
+                        encryptedAESKey: encryptedAESKey.toString('hex')
+                    });
                 } catch (e) {
                     console.error("Errore inserimento Temperatura:", e);
                 }
@@ -119,7 +146,7 @@ async function processFiles() {
                 clearInterval(intervalId);
                 const elapsedTime = Date.now() - startTime;
                 console.log("Elaborazione completata.");
-                console.log(`Tempo totale: ${elapsedTime/1000}s.`);
+                console.log(`Tempo totale: ${elapsedTime / 1000}s.`);
                 console.log(`Totale righe processate: [CO₂ -> ${indexCO2}], [Temperatura -> ${indexTemp}]`);
                 console.log("Chiusura connessione MongoDB.");
                 await client.close();
