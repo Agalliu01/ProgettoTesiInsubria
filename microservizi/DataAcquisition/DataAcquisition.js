@@ -177,6 +177,11 @@ async function requestConnection() {
             ipAddress: ipInfo
         };
 
+        // Se ho già una chiave locale, la invio per autenticare il servizio registrato
+        if (localKeys && localKeys.privateKey) {
+            requestBody.privateKey = localKeys.privateKey;
+        }
+
         let attempts = 0;
         const maxAttempts = 3;
         let connectionResponse = null;

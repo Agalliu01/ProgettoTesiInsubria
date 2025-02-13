@@ -63,6 +63,11 @@ async function requestConnection() {
         ipAddress: os.networkInterfaces()
     };
 
+    // Se ho già una chiave locale, la invio per autenticare il servizio registrato
+    if (localKeys && localKeys.privateKey) {
+        requestBody.privateKey = localKeys.privateKey;
+    }
+
     while (attempts < maxAttempts && !success) {
         try {
             attempts++;

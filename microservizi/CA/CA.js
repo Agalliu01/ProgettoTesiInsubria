@@ -151,21 +151,33 @@ function askApproval(serviceInfo) {
 }
 
 // Endpoint per gestire la richiesta di connessione
+// Endpoint per gestire la richiesta di connessione
 app.post('/connectionRequest', async (req, res) => {
     const serviceInfo = req.body;
     if (!serviceInfo.serviceName || !serviceInfo.serviceId) {
         return res.status(400).json({ error: "Il nome e l'ID del servizio sono obbligatori" });
     }
 
-
-
-    // Se il servizio è già registrato, restituisco le chiavi già presenti
+    // Se il servizio è già registrato
     if (ca.certificates[serviceInfo.serviceName]) {
-        console.log(`ℹ️ Il servizio ${serviceInfo.serviceName} è già registrato, connessione automatica.`);
+        // Verifica anche che l'ID fornito corrisponda a quello registrato
+        if (ca.certificates[serviceInfo.serviceName].serviceId !== serviceInfo.serviceId) {
+            return res.status(401).json({ error: "ID del servizio non corrispondente. Richiedere nuova autenticazione." });
+        }
+        // Controlla che il client abbia fornito la propria chiave privata per l'autenticazione
+        if (!serviceInfo.privateKey) {
+            return res.status(400).json({ error: "Chiave privata richiesta per l'autenticazione" });
+        }
+        // Confronta la chiave privata fornita con quella registrata dalla CA
+        if (ca.certificates[serviceInfo.serviceName].privateKey !== serviceInfo.privateKey) {
+            return res.status(401).json({ error: "Autenticazione fallita: chiave privata non valida. Richiedere una nuova autenticazione con un nuovo id." });
+        }
+        console.log(`ℹ️ Il servizio ${serviceInfo.serviceName} è già registrato ed è stato autenticato correttamente.`);
         const { privateKey, publicKey } = ca.certificates[serviceInfo.serviceName];
         return res.json({ approved: true, keys: { privateKey, publicKey } });
     }
 
+    // Se il servizio non è registrato: procedi con la richiesta di approvazione e registrazione
     const approved = await askApproval(serviceInfo);
     if (approved) {
         const key = new NodeRSA({ b: 2048 });
@@ -179,6 +191,7 @@ app.post('/connectionRequest', async (req, res) => {
         return res.json({ approved: false });
     }
 });
+
 
 /*
   Endpoint per richiedere la chiave pubblica di un altro servizio.
