@@ -1,135 +1,150 @@
-const express = require('express');
-const { MongoClient } = require('mongodb');
-const crypto = require('crypto');
-const NodeRSA = require('node-rsa');
 const axios = require('axios');
-const app = express();
-const PORT = 3000;
+const os = require('os');
+const fs = require('fs').promises;
+const { MongoClient } = require('mongodb');
+const NodeRSA = require('node-rsa');
+const crypto = require('crypto');
 
-// Configurazione MongoDB
+// Configurazioni
+const caIP = '100.86.173.100';
+const KEYS_FILE = './my_keys_decryption.json';
 const mongoUrl = 'mongodb://localhost:27017/';
-//const mongoUrl = 'mongodb://admin:password@100.111.12.33:27017';
 const dbName = 'sensor_data';
 const collectionNameCO2 = 'co2_readings';
-const collectionNameTemperature = 'temperature_readings';
 
-// Funzione per decifrare la chiave AES con la chiave privata RSA
+// Variabili globali
+let localKeys = null;
+let keyCache = {}; // Cache per le chiavi private dei servizi target
+
+async function requestConnection() {
+    try {
+        try {
+            const data = await fs.readFile(KEYS_FILE, 'utf8');
+            localKeys = JSON.parse(data);
+            console.log("✅ Chiavi locali trovate.");
+        } catch (err) {
+            console.log("⚠️ Nessun file di chiavi trovato. Richiesta connessione alla CA...");
+        }
+
+        if (!localKeys) {
+            const url = `http://${caIP}:3000/connectionRequest`;
+            const requestBody = {
+                serviceName: 'DataDecryption',
+                serviceId: 'DataDecryption-001',
+                description: 'Servizio per decrittazione dei dati',
+                owner: 'Company123',
+                ipAddress: os.networkInterfaces()
+            };
+
+            console.log("🔗 Inviando richiesta di connessione alla CA...");
+            const response = await axios.post(url, requestBody);
+            console.log("✅ Risposta della CA ricevuta.");
+
+            if (response.data.approved && response.data.keys) {
+                localKeys = response.data.keys;
+                await fs.writeFile(KEYS_FILE, JSON.stringify(localKeys, null, 2));
+                console.log("🔑 Chiavi ricevute e salvate in", KEYS_FILE);
+            } else {
+                console.error("❌ Errore: La CA non ha fornito le chiavi. Uscita.");
+                process.exit(1);
+            }
+        } else {
+            console.log("✅ Utilizzo chiavi locali già esistenti.");
+        }
+    } catch (err) {
+        console.error("❌ Errore nella richiesta di connessione alla CA:", err.message);
+        process.exit(1);
+    }
+}
+
+async function getTargetPrivateKey(targetServiceId) {
+    if (keyCache[targetServiceId]) {
+        return keyCache[targetServiceId];
+    }
+
+    try {
+        console.log(`🔍 Richiesta chiave privata per il target ${targetServiceId} alla CA...`);
+        const url = `http://${caIP}:3000/requestKey`;
+        const response = await axios.post(url, {
+            requesterServiceId: 'DataDecryption-001',
+            requesterPrivateKey: localKeys.privateKey,
+            targetServiceId
+        });
+
+        if (response.data && response.data.privateKey) {
+            console.log(`✅ Chiave privata ricevuta per il target ${targetServiceId}.`);
+            keyCache[targetServiceId] = response.data.privateKey;
+            return response.data.privateKey;
+        } else {
+            throw new Error(`❌ Chiave privata non ricevuta per ${targetServiceId}.`);
+        }
+    } catch (err) {
+        console.error(`❌ Errore nel recupero della chiave per ${targetServiceId}:`, err.message);
+        throw err;
+    }
+}
+
 function decryptAESKeyWithRSA(encryptedAESKey, privateKey) {
     try {
         const key = new NodeRSA(privateKey);
+        if (!key.isPrivate()) throw new Error('Chiave privata non valida.');
 
-        // Verifica che la chiave sia valida
-        if (!key.isPrivate()) {
-            throw new Error('La chiave non è una chiave privata valida.');
-        }
-
-        // Converte l'`encryptedAESKey` in un buffer se è una stringa esadecimale
-        const encryptedAESKeyBuffer = Buffer.isBuffer(encryptedAESKey)
-            ? encryptedAESKey
-            : Buffer.from(encryptedAESKey, 'hex');
-
-        // Decifra la chiave AES
-        const decryptedKey = key.decrypt(encryptedAESKeyBuffer, 'buffer');
-        console.log("Chiave AES decriptata (hex):", decryptedKey.toString('hex'));
-        return decryptedKey; // Restituisce la chiave AES come buffer
+        return key.decrypt(Buffer.from(encryptedAESKey, 'hex'));
     } catch (err) {
-        console.error('Errore nella decrittazione della chiave AES:', err);
+        console.error("❌ Errore nella decrittazione della chiave AES:", err.message);
         throw err;
     }
 }
 
-
-
-/// Funzione per decifrare i dati con AES
 function decryptWithAES(encryptedData, aesKey, iv) {
-    const ivBuffer = Buffer.from(iv, 'hex');  // Assicurati che l'IV sia un buffer
-    const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, ivBuffer);
-    let decrypted = decipher.update(encryptedData, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
-}
-
-
-// Funzione per ottenere la chiave privata dalla CA
-async function getPrivateKeyFromCA(serviceName) {
     try {
-        // Chiamata HTTP per ottenere la chiave privata dalla CA
-        const response = await axios.get(`http://localhost:3000/privateKey/${serviceName}`);
-        return response.data; // Restituisce la chiave privata
+        const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, Buffer.from(iv, 'hex'));
+        let decrypted = decipher.update(Buffer.from(encryptedData, 'hex'), 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        return decrypted;
     } catch (err) {
-        console.error("Errore nel recupero della chiave privata dalla CA:", err);
+        console.error("❌ Errore nella decrittazione dei dati:", err.message);
         throw err;
     }
 }
 
-
-
-
-
-async function decrypt() {
-
-    console.log("Richiesta di decrittazione ricevuta");  // Aggiungi questo log
+async function decryptData() {
+    console.log("🔐 Avvio processo di decrittazione...");
     try {
-        const serviceName = 'DataAcquisition'; // Nome del servizio per il quale vogliamo la chiave privata
-        console.log("Recuperando la chiave privata dalla CA...");
-
-        const privateKey = await getPrivateKeyFromCA(serviceName);
-        console.log("Chiave privata ricevuta:", privateKey); // Aggiungi questo log
-
-        // Connessione a MongoDB
         const client = new MongoClient(mongoUrl);
         await client.connect();
-        console.log('✅ Connessione a MongoDB aperta.');
-
+        console.log("✅ Connessione a MongoDB stabilita.");
         const db = client.db(dbName);
-        const co2Collection = db.collection(collectionNameCO2);
-        const tempCollection = db.collection(collectionNameTemperature);
+        const collection = db.collection(collectionNameCO2);
+        const records = await collection.find().toArray();
 
-       const co2Data = await co2Collection.find().limit(1).toArray();
-    //    const tempData = await tempCollection.find().toArray();
+        if (!records.length) {
+            console.log("⚠️ Nessun dato trovato.");
+            await client.close();
+            return;
+        }
 
-
-
-      //  const decryptedCO2Data = await Promise.all(co2Data.map(async (entry) => {
-
-            if (co2Data.length > 0) {
-                const entry = co2Data[0];
-
-
-
-                console.log("Decifrando entry CO2:", entry);
-                const aesKey= decryptAESKeyWithRSA(entry.encryptedAESKey, privateKey); // Decifra la chiave AES
-                console.log("Chiave AES decriptata (buffer):", aesKey);
-
-                const decryptedData = decryptWithAES(entry.encryptedData, aesKey, entry.iv); // Decifra i dati
-                console.log("Dati decifrati CO2:", decryptedData);
-                return JSON.parse(decryptedData); // Restituisce i dati decifrati come oggetto
+        for (const record of records) {
+            try {
+                const targetServiceId = record.serviceId;
+                const targetPrivateKey = await getTargetPrivateKey(targetServiceId);
+                const aesKey = decryptAESKeyWithRSA(record.encryptedAESKey, targetPrivateKey);
+                const decryptedData = decryptWithAES(record.encryptedData, aesKey, record.iv);
+                console.log(`✅ Dati decriptati per ${targetServiceId}:`, decryptedData);
+            } catch (err) {
+                console.error("❌ Errore nella decrittazione del record:", err.message);
             }
-       // }));
-/*
-        const decryptedTempData = await Promise.all(tempData.map(async (entry) => {
-            console.log("Decifrando entry Temperatura:", entry);
-            const aesKey = decryptAESKeyWithRSA(entry.encryptedAESKey, privateKey); // Decifra la chiave AES
-            console.log("Chiave AES decifrata:", aesKey.toString('hex'));
-            const decryptedData = decryptWithAES(entry.encryptedData, aesKey, entry.iv); // Decifra i dati
-            console.log("Dati decifrati Temperatura:", decryptedData);
-            return JSON.parse(decryptedData); // Restituisce i dati decifrati come oggetto
-        }));
-*/
+        }
         await client.close();
-        console.log("Chiusura connessione MongoDB.");
-
-        // Restituisce i dati decifrati
-        console.log("CO2 Data Decifrato:", decryptedCO2Data);
-        console.log("Temperature Data Decifrato:", decryptedTempData);
-
-
-        console.log("Chiave privata ricevuta e decrittazione dati bloccata.");
-
+        console.log("✅ Connessione a MongoDB chiusa.");
     } catch (err) {
-        console.error('Errore:', err);
-        console.error('Errore durante la decifrazione dei dati.');
+        console.error("❌ Errore nel processo di decrittazione:", err.message);
     }
 }
 
-decrypt();
+async function main() {
+    await requestConnection();
+    await decryptData();
+}
+
+main();

@@ -1,5 +1,6 @@
+const axios = require('axios');
+const os = require('os');
 const timeout = 0; // tempo (ms) tra il processamento di ogni riga
-
 const fs = require('fs').promises;
 const { MongoClient } = require('mongodb');
 
@@ -11,8 +12,6 @@ const {
 } = require('./encryption');
 
 const mongoUrl = 'mongodb://localhost:27017/';
-//const mongoUrl = 'mongodb://admin:password@100.111.12.33:27017';
-
 const dbName = 'sensor_data';
 
 const filePathCO2 = '../DataCO2_Adeunis';
@@ -21,13 +20,10 @@ const filePathTemperature = '../DataTemperature_Adeunis';
 const collectionNameCO2 = 'co2_readings';
 const collectionNameTemperature = 'temperature_readings';
 
-// Genera una barra di avanzamento con 5 segmenti (20% ciascuno)
-const renderProgressBar = (progress) => {
-    const totalBars = 5;
-    const prog = Math.min(progress, 1);
-    const filled = Math.floor(prog * totalBars);
-    return `[${'#'.repeat(filled)}${'-'.repeat(totalBars - filled)}] ${Math.floor(prog * 100)}%`;
-};
+const serviceId = 'DataAcquisition-001'; // ID del servizio
+
+// File locale in cui salvare le chiavi ottenute dalla CA
+const KEYS_FILE = './my_keys.json';
 
 async function processFiles() {
     const client = new MongoClient(mongoUrl);
@@ -38,7 +34,6 @@ async function processFiles() {
         const co2Collection = db.collection(collectionNameCO2);
         const tempCollection = db.collection(collectionNameTemperature);
 
-        // Lettura in parallelo dei due file
         const [co2Data, tempData] = await Promise.all([
             fs.readFile(filePathCO2, 'utf8'),
             fs.readFile(filePathTemperature, 'utf8')
@@ -48,16 +43,13 @@ async function processFiles() {
         const tempLines = tempData.split('\n').filter(line => line.trim() !== '');
         console.log(`Simulazione rilevazione: ${co2Lines.length} righe CO₂ e ${tempLines.length} righe Temperatura.`);
 
-        // Avvio del timer
-        const startTime = Date.now();
+        // Otteniamo la chiave pubblica di destinazione per cifrare la chiave AES.
+        // (La logica di ottenimento della chiave pubblica è separata e gestita in getPublicKey.)
+        const publicKey = await getPublicKey('DataAcquisition');
 
         let indexCO2 = 0, indexTemp = 0;
-        let thresholdCO2 = 0.2, thresholdTemp = 0.2;
-
-        const publicKey = await getPublicKey('DataAcquisition'); // Carica la chiave pubblica RSA (con await)
 
         const intervalId = setInterval(async () => {
-            // Elaborazione del file CO₂ (se ancora disponibile)
             if (indexCO2 < co2Lines.length) {
                 const values = co2Lines[indexCO2].split('\t').map(v => v.trim());
                 const dataObj = {
@@ -81,6 +73,7 @@ async function processFiles() {
 
                 try {
                     await co2Collection.insertOne({
+                        serviceId, // Salva il serviceId in chiaro
                         encryptedData,
                         iv,
                         encryptedAESKey: encryptedAESKey.toString('hex')
@@ -89,14 +82,8 @@ async function processFiles() {
                     console.error("Errore inserimento CO₂:", e);
                 }
                 indexCO2++;
-                const progress = indexCO2 / co2Lines.length;
-                if (progress >= thresholdCO2 || indexCO2 === co2Lines.length) {
-                    console.log("CO₂ progress: " + renderProgressBar(progress));
-                    thresholdCO2 += 0.2;
-                }
             }
 
-            // Elaborazione del file Temperatura (se ancora disponibile)
             if (indexTemp < tempLines.length) {
                 const values = tempLines[indexTemp].split('\t').map(v => v.trim());
                 const dataObj = {
@@ -126,6 +113,7 @@ async function processFiles() {
 
                 try {
                     await tempCollection.insertOne({
+                        serviceId, // Salva il serviceId in chiaro
                         encryptedData,
                         iv,
                         encryptedAESKey: encryptedAESKey.toString('hex')
@@ -134,21 +122,11 @@ async function processFiles() {
                     console.error("Errore inserimento Temperatura:", e);
                 }
                 indexTemp++;
-                const progress = indexTemp / tempLines.length;
-                if (progress >= thresholdTemp || indexTemp === tempLines.length) {
-                    console.log("Temperatura progress: " + renderProgressBar(progress));
-                    thresholdTemp += 0.2;
-                }
             }
 
-            // Se entrambi i file sono stati completamente processati
             if (indexCO2 >= co2Lines.length && indexTemp >= tempLines.length) {
                 clearInterval(intervalId);
-                const elapsedTime = Date.now() - startTime;
                 console.log("Elaborazione completata.");
-                console.log(`Tempo totale: ${elapsedTime / 1000}s.`);
-                console.log(`Totale righe processate: [CO₂ -> ${indexCO2}], [Temperatura -> ${indexTemp}]`);
-                console.log("Chiusura connessione MongoDB.");
                 await client.close();
             }
         }, timeout);
@@ -159,4 +137,72 @@ async function processFiles() {
     }
 }
 
-processFiles();
+async function requestConnection() {
+    try {
+        let localKeys = null;
+        // Provo a leggere il file delle chiavi se esiste
+        try {
+            const keysData = await fs.readFile(KEYS_FILE, 'utf8');
+            localKeys = JSON.parse(keysData);
+            console.log("Chiavi locali trovate:", localKeys);
+        } catch (err) {
+            console.log("Nessun file di chiavi trovato, attendo che la CA mi fornisca le chiavi...");
+        }
+
+        // Recupera informazioni sull'IP (adattare se necessario)
+        const ipInfo = os.networkInterfaces();
+
+        if (localKeys) {
+            // Verifica le chiavi già in possesso con la CA
+            try {
+                const verifyResponse = await axios.post('http://100.86.173.100:3000/verifyKeys', {
+                    serviceName: 'DataAcquisition',
+                    serviceId,
+                    privateKey: localKeys.privateKey,
+                    publicKey: localKeys.publicKey,
+                    description: 'Servizio per l’elaborazione dei dati dei sensori',
+                    owner: 'Company123',
+                    ipAddress: ipInfo
+                });
+                if (verifyResponse.data.approved) {
+                    console.log("✅ Connessione verificata con la CA");
+                    processFiles();
+                    return;
+                } else {
+                    console.error("❌ Verifica chiavi fallita:", verifyResponse.data.error);
+                }
+            } catch (verifyError) {
+                console.error("Errore nella verifica delle chiavi con la CA:", verifyError.message);
+            }
+            console.log("Verifica fallita o non effettuata, procedo con la richiesta di connessione alla CA...");
+        }
+
+        // Richiesta di connessione alla CA (ci si aspetta che la CA fornisca le chiavi)
+        const connectionResponse = await axios.post('http://100.86.173.100:3000/connectionRequest', {
+            serviceName: 'DataAcquisition',
+            serviceId,
+            description: 'Servizio per l’elaborazione dei dati dei sensori',
+            owner: 'Company123',
+            ipAddress: ipInfo
+        });
+        if (connectionResponse.data.approved) {
+            console.log("✅ Connessione approvata/verificata dalla CA");
+            if (connectionResponse.data.keys) {
+                await fs.writeFile(KEYS_FILE, JSON.stringify(connectionResponse.data.keys, null, 2));
+                console.log("Chiavi ricevute dalla CA e salvate in", KEYS_FILE);
+                processFiles();
+            } else {
+                console.error("❌ La CA non ha fornito le chiavi. Non posso procedere.");
+                process.exit(1);
+            }
+        } else {
+            console.error("❌ Connessione rifiutata dalla CA");
+            process.exit(1);
+        }
+    } catch (error) {
+        console.error("Errore durante la richiesta di connessione a CA:", error);
+        process.exit(1);
+    }
+}
+
+requestConnection();
