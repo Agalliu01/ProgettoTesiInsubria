@@ -1,0 +1,9 @@
+{
+  "data_acquisition": {
+    "id": "6d051e70-97e8-429e-9e8b-658254c01833",
+    "publicKeyPath": "C:\\Users\\tahir\\IdeaProjects\\ProgettoTesiInsubria\\microservizi\\CA\\data_acquisition-public.pem",
+    "privateKeyPath": "C:\\Users\\tahir\\IdeaProjects\\ProgettoTesiInsubria\\microservizi\\CA\\data_acquisition-private.pem",
+    "name": "data_acquisition",
+    "approvedAt": "2025-02-12T16:13:18.738Z"
+  }
+}
