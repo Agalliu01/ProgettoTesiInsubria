@@ -3,6 +3,7 @@ const os = require('os');
 const timeout = 0; // tempo (ms) tra il processamento di ogni riga
 const fs = require('fs').promises;
 const { MongoClient } = require('mongodb');
+const path = require('path');
 
 const {
     generateAESKey,
@@ -17,6 +18,8 @@ const dbName = 'sensor_data';
 const filePathCO2 = '../DataCO2_Adeunis';
 const filePathTemperature = '../DataTemperature_Adeunis';
 
+
+
 const collectionNameCO2 = 'co2_readings';
 const collectionNameTemperature = 'temperature_readings';
 
@@ -24,6 +27,8 @@ const serviceId = 'DataAcquisition-001'; // ID del servizio
 
 // File locale in cui salvare le chiavi ottenute dalla CA
 const KEYS_FILE = './my_keys.json';
+
+
 
 async function processFiles() {
     const client = new MongoClient(mongoUrl);
@@ -152,10 +157,12 @@ async function requestConnection() {
         // Recupera informazioni sull'IP (adattare se necessario)
         const ipInfo = os.networkInterfaces();
 
+/*
         if (localKeys) {
             // Verifica le chiavi già in possesso con la CA
             try {
-                const verifyResponse = await axios.post('http://100.86.173.100:3000/verifyKeys', {
+                const verifyResponse = await axios.post('http://100.104.242.90:3000/verifyKeys', {
+               // const verifyResponse = await axios.post('http://100.104.242.90:3000/verifyKeys', {
                     serviceName: 'DataAcquisition',
                     serviceId,
                     privateKey: localKeys.privateKey,
@@ -174,11 +181,13 @@ async function requestConnection() {
             } catch (verifyError) {
                 console.error("Errore nella verifica delle chiavi con la CA:", verifyError.message);
             }
-            console.log("Verifica fallita o non effettuata, procedo con la richiesta di connessione alla CA...");
+           // console.log("Verifica fallita o non effettuata, procedo con la richiesta di connessione alla CA...");
         }
-
+*/
         // Richiesta di connessione alla CA (ci si aspetta che la CA fornisca le chiavi)
-        const connectionResponse = await axios.post('http://100.86.173.100:3000/connectionRequest', {
+
+        const connectionResponse = await axios.post('http://100.104.242.90:3000/connectionRequest', {
+      //  const connectionResponse = await axios.post('http://100.86.173.100:3000/connectionRequest', {
             serviceName: 'DataAcquisition',
             serviceId,
             description: 'Servizio per l’elaborazione dei dati dei sensori',

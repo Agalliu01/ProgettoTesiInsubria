@@ -19,7 +19,43 @@ class CertificateAuthority {
     constructor() {
         this.certificates = {};  // Mappa il nome del servizio a un oggetto contenente informazioni e chiavi
         this.authenticatedClients = new Set();  // Set di client autenticati (non utilizzato in questo esempio, ma riservato per ulteriori controlli)
+        this._loadCertificates();
     }
+
+
+    // Carica i certificati dai file JSON all'avvio
+    _loadCertificates() {
+        // Carica le chiavi private
+        if (fs.existsSync(PRIVATE_KEYS_FILE)) {
+            try {
+                const privateData = JSON.parse(fs.readFileSync(PRIVATE_KEYS_FILE, 'utf8'));
+                for (const [serviceName, { serviceId, key }] of Object.entries(privateData)) {
+                    this.certificates[serviceName] = {
+                        serviceId,
+                        privateKey: key
+                    };
+                }
+            } catch (e) {
+                console.error("Errore nel caricare il file delle chiavi private:", e);
+            }
+        }
+
+        // Carica le chiavi pubbliche
+        if (fs.existsSync(PUBLIC_KEYS_FILE)) {
+            try {
+                const publicData = JSON.parse(fs.readFileSync(PUBLIC_KEYS_FILE, 'utf8'));
+                for (const [serviceName, { serviceId, key }] of Object.entries(publicData)) {
+                    // Aggiorna i certificati con la chiave pubblica
+                    if (this.certificates[serviceName]) {
+                        this.certificates[serviceName].publicKey = key;
+                    }
+                }
+            } catch (e) {
+                console.error("Errore nel caricare il file delle chiavi pubbliche:", e);
+            }
+        }
+    }
+
 
     // Registra un servizio con le sue chiavi pubbliche e private
     registerService(serviceInfo, privateKey, publicKey) {
@@ -83,6 +119,8 @@ class CertificateAuthority {
     }
 }
 
+
+
 const ca = new CertificateAuthority();
 
 // Creazione dell'interfaccia readline per il prompt in console
@@ -113,6 +151,8 @@ app.post('/connectionRequest', async (req, res) => {
     if (!serviceInfo.serviceName || !serviceInfo.serviceId) {
         return res.status(400).json({ error: "Il nome e l'ID del servizio sono obbligatori" });
     }
+
+
 
     // Se il servizio è già registrato, restituisco le chiavi già presenti
     if (ca.certificates[serviceInfo.serviceName]) {

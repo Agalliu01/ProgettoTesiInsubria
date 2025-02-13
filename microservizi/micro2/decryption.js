@@ -4,10 +4,14 @@ const fs = require('fs').promises;
 const { MongoClient } = require('mongodb');
 const NodeRSA = require('node-rsa');
 const crypto = require('crypto');
+const path = require("path");
 
 // Configurazioni
-const caIP = '100.86.173.100';
+const caIP = '100.104.242.90';
+//const caIP = '100.86.173.100';
+
 const KEYS_FILE = './my_keys_decryption.json';
+//const KEYS_FILE = path.join(__dirname,  'my_keys_decryption.json');
 const mongoUrl = 'mongodb://localhost:27017/';
 const dbName = 'sensor_data';
 const collectionNameCO2 = 'co2_readings';
