@@ -1,3 +1,8 @@
+const USE_LOCALHOST = false; // Imposta a false per usare l'IP locale,meglio lasciare in ascolto dappertutto (false)
+const HOST = USE_LOCALHOST ? 'localhost' : '0.0.0.0';
+
+
+
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -248,6 +253,6 @@ function getLocalIP() {
     return 'localhost';
 }
 //sa
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Certificate Authority in ascolto su http://${getLocalIP()}:${PORT}`);
+app.listen(PORT, HOST, () => {
+    console.log(`Certificate Authority in ascolto su http://${HOST}:${PORT}`);
 });

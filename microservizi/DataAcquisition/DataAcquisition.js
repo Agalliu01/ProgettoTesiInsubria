@@ -1,3 +1,18 @@
+const USE_TAILSCALE = false; // Imposta a true per usare l'IP Tailscale, false per usare localhost
+
+function getTailscaleIP(ipInfo) {
+    for (const iface in ipInfo) {
+        if (iface.toLowerCase().includes('tailscale')) {
+            for (const addr of ipInfo[iface]) {
+                if (addr.family === 'IPv4' && !addr.internal) {
+                    return addr.address;
+                }
+            }
+        }
+    }
+    return null;
+}
+
 const axios = require('axios');
 const os = require('os');
 const timeout = 0; // tempo (ms) tra il processamento di ogni riga
@@ -18,8 +33,6 @@ const dbName = 'sensor_data';
 const filePathCO2 = '../DataCO2_Adeunis';
 const filePathTemperature = '../DataTemperature_Adeunis';
 
-
-
 const collectionNameCO2 = 'co2_readings';
 const collectionNameTemperature = 'temperature_readings';
 
@@ -27,8 +40,6 @@ const serviceId = 'DataAcquisition-001'; // ID del servizio
 
 // File locale in cui salvare le chiavi ottenute dalla CA
 const KEYS_FILE = './my_keys.json';
-
-
 
 async function processFiles() {
     const client = new MongoClient(mongoUrl);
@@ -156,44 +167,41 @@ async function requestConnection() {
 
         // Recupera informazioni sull'IP (adattare se necessario)
         const ipInfo = os.networkInterfaces();
-
-/*
-        if (localKeys) {
-            // Verifica le chiavi già in possesso con la CA
-            try {
-                const verifyResponse = await axios.post('http://100.104.242.90:3000/verifyKeys', {
-               // const verifyResponse = await axios.post('http://100.104.242.90:3000/verifyKeys', {
-                    serviceName: 'DataAcquisition',
-                    serviceId,
-                    privateKey: localKeys.privateKey,
-                    publicKey: localKeys.publicKey,
-                    description: 'Servizio per l’elaborazione dei dati dei sensori',
-                    owner: 'Company123',
-                    ipAddress: ipInfo
-                });
-                if (verifyResponse.data.approved) {
-                    console.log("✅ Connessione verificata con la CA");
-                    processFiles();
-                    return;
-                } else {
-                    console.error("❌ Verifica chiavi fallita:", verifyResponse.data.error);
-                }
-            } catch (verifyError) {
-                console.error("Errore nella verifica delle chiavi con la CA:", verifyError.message);
-            }
-           // console.log("Verifica fallita o non effettuata, procedo con la richiesta di connessione alla CA...");
-        }
-*/
-        // Richiesta di connessione alla CA (ci si aspetta che la CA fornisca le chiavi)
-
-        const connectionResponse = await axios.post('http://100.104.242.90:3000/connectionRequest', {
-      //  const connectionResponse = await axios.post('http://100.86.173.100:3000/connectionRequest', {
+        const baseURL = USE_TAILSCALE ? `http://${getTailscaleIP(ipInfo)}:3000` : 'http://localhost:3000';
+        const url = `${baseURL}/connectionRequest`;
+        const requestBody = {
             serviceName: 'DataAcquisition',
             serviceId,
             description: 'Servizio per l’elaborazione dei dati dei sensori',
             owner: 'Company123',
             ipAddress: ipInfo
-        });
+        };
+
+        let attempts = 0;
+        const maxAttempts = 3;
+        let connectionResponse = null;
+        let success = false;
+        while (attempts < maxAttempts && !success) {
+            try {
+                attempts++;
+                console.log(`🔗 Inviando richiesta di connessione alla CA... Tentativo ${attempts}`);
+                connectionResponse = await axios.post(url, requestBody);
+                if (connectionResponse.data.approved) {
+                    success = true;
+                } else {
+                    throw new Error("Connessione rifiutata dalla CA");
+                }
+            } catch (error) {
+                console.error(`❌ Tentativo ${attempts} fallito: ${error.message}`);
+                if (attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                } else {
+                    console.error("❌ Numero massimo di tentativi raggiunto. Uscita.");
+                    process.exit(1);
+                }
+            }
+        }
+
         if (connectionResponse.data.approved) {
             console.log("✅ Connessione approvata/verificata dalla CA");
             if (connectionResponse.data.keys) {
@@ -209,7 +217,7 @@ async function requestConnection() {
             process.exit(1);
         }
     } catch (error) {
-        console.error("Errore durante la richiesta di connessione a CA:", error);
+        console.error("Errore durante la richiesta di connessione a CA:", error.message);
         process.exit(1);
     }
 }

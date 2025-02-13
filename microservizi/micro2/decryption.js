@@ -1,3 +1,17 @@
+const USE_TAILSCALE = false; // Imposta a true per usare l'IP Tailscale, false per usare localhost
+function getTailscaleIP(ipInfo) {
+    for (const iface in ipInfo) {
+        if (iface.toLowerCase().includes('tailscale')) {
+            for (const addr of ipInfo[iface]) {
+                if (addr.family === 'IPv4' && !addr.internal) {
+                    return addr.address;
+                }
+            }
+        }
+    }
+    return null;
+}
+
 const axios = require('axios');
 const os = require('os');
 const fs = require('fs').promises;
@@ -7,8 +21,9 @@ const crypto = require('crypto');
 const path = require("path");
 
 // Configurazioni
-const caIP = '100.104.242.90';
-//const caIP = '100.86.173.100';
+//const caIP = '100.104.242.90';
+const caIP = '100.86.173.100';
+//1const caIP = 'localhost';
 
 const KEYS_FILE = './my_keys_decryption.json';
 //const KEYS_FILE = path.join(__dirname,  'my_keys_decryption.json');
@@ -21,26 +36,37 @@ let localKeys = null;
 let keyCache = {}; // Cache per le chiavi private dei servizi target
 
 async function requestConnection() {
+    // Tenta di leggere le chiavi locali
+    let keysLoaded = false;
     try {
+        const data = await fs.readFile(KEYS_FILE, 'utf8');
+        localKeys = JSON.parse(data);
+        console.log("✅ Chiavi locali trovate.");
+        keysLoaded = true;
+    } catch (err) {
+        console.log("⚠️ Nessun file di chiavi trovato.");
+    }
+
+    // Tenta comunque la connessione alla CA, anche se le chiavi sono state trovate
+    let attempts = 0;
+    const maxAttempts = 3;
+    let success = false;
+    const baseURL = USE_TAILSCALE
+        ? `http://${getTailscaleIP(os.networkInterfaces())}:3000`
+        : `http://localhost:3000`;
+    const url = `${baseURL}/connectionRequest`;
+    const requestBody = {
+        serviceName: 'DataDecryption',
+        serviceId: 'DataDecryption-001',
+        description: 'Servizio per decrittazione dei dati',
+        owner: 'Company123',
+        ipAddress: os.networkInterfaces()
+    };
+
+    while (attempts < maxAttempts && !success) {
         try {
-            const data = await fs.readFile(KEYS_FILE, 'utf8');
-            localKeys = JSON.parse(data);
-            console.log("✅ Chiavi locali trovate.");
-        } catch (err) {
-            console.log("⚠️ Nessun file di chiavi trovato. Richiesta connessione alla CA...");
-        }
-
-        if (!localKeys) {
-            const url = `http://${caIP}:3000/connectionRequest`;
-            const requestBody = {
-                serviceName: 'DataDecryption',
-                serviceId: 'DataDecryption-001',
-                description: 'Servizio per decrittazione dei dati',
-                owner: 'Company123',
-                ipAddress: os.networkInterfaces()
-            };
-
-            console.log("🔗 Inviando richiesta di connessione alla CA...");
+            attempts++;
+            console.log(`🔗 Inviando richiesta di connessione alla CA... Tentativo ${attempts}`);
             const response = await axios.post(url, requestBody);
             console.log("✅ Risposta della CA ricevuta.");
 
@@ -48,16 +74,19 @@ async function requestConnection() {
                 localKeys = response.data.keys;
                 await fs.writeFile(KEYS_FILE, JSON.stringify(localKeys, null, 2));
                 console.log("🔑 Chiavi ricevute e salvate in", KEYS_FILE);
+                success = true;
             } else {
-                console.error("❌ Errore: La CA non ha fornito le chiavi. Uscita.");
+                throw new Error("La CA non ha fornito le chiavi.");
+            }
+        } catch (error) {
+            console.error(`❌ Tentativo ${attempts} fallito: ${error.message}`);
+            if (attempts < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, 2000)); // timeout di 2 secondi tra un tentativo e l'altro
+            } else {
+                console.error("❌ Numero massimo di tentativi raggiunto. Uscita.");
                 process.exit(1);
             }
-        } else {
-            console.log("✅ Utilizzo chiavi locali già esistenti.");
         }
-    } catch (err) {
-        console.error("❌ Errore nella richiesta di connessione alla CA:", err.message);
-        process.exit(1);
     }
 }
 
@@ -68,7 +97,10 @@ async function getTargetPrivateKey(targetServiceId) {
 
     try {
         console.log(`🔍 Richiesta chiave privata per il target ${targetServiceId} alla CA...`);
-        const url = `http://${caIP}:3000/requestKey`;
+        const baseURL = USE_TAILSCALE
+            ? `http://${getTailscaleIP(os.networkInterfaces())}:3000`
+            : 'http://localhost:3000';
+        const url = `${baseURL}/requestKey`;
         const response = await axios.post(url, {
             requesterServiceId: 'DataDecryption-001',
             requesterPrivateKey: localKeys.privateKey,
