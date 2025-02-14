@@ -155,9 +155,9 @@ async function requestConnection() {
     try {
         const keysData = await fs.readFile(KEYS_FILE, 'utf8');
         localKeys = JSON.parse(keysData);
-        console.log("Chiavi locali trovate:", localKeys);
+        console.log("✅ Chiavi locali trovate:", localKeys);
     } catch (err) {
-        console.log("Nessun file di chiavi trovato, attendo che la CA mi fornisca le chiavi...");
+        console.log("⚠️ Nessun file di chiavi trovato, attendo che la CA mi fornisca le chiavi...");
     }
 
     const ipInfo = os.networkInterfaces();
@@ -166,10 +166,9 @@ async function requestConnection() {
         : 'http://localhost:3000';
     const url = `${baseURL}/connectionRequest`;
 
-    let currentServiceId = serviceId;
     const requestBody = {
         serviceName: 'DataAcquisition',
-        serviceId: currentServiceId,
+        serviceId: serviceId,
         description: 'Servizio per l’elaborazione dei dati dei sensori',
         owner: 'Company123',
         ipAddress: ipInfo
@@ -179,55 +178,31 @@ async function requestConnection() {
         requestBody.privateKey = localKeys.privateKey;
     }
 
-    let attempts = 0;
-    const maxAttempts = 3;
-    let connectionResponse = null;
-    let success = false;
-    while (attempts < maxAttempts && !success) {
-        try {
-            attempts++;
-            console.log(`🔗 Inviando richiesta di connessione alla CA... Tentativo ${attempts}`);
-            connectionResponse = await axios.post(url, requestBody);
-            if (connectionResponse.data.approved) {
-                success = true;
+    try {
+        console.log("🔗 Inviando richiesta di connessione alla CA...");
+        // Timeout impostato a 10 secondi
+        const response = await axios.post(url, requestBody, { timeout: 10000 });
+        if (response.data.approved) {
+            console.log("✅ Connessione approvata/verificata dalla CA");
+            if (response.data.keys) {
+                await fs.writeFile(KEYS_FILE, JSON.stringify(response.data.keys, null, 2));
+                console.log("🔑 Chiavi ricevute dalla CA e salvate in", KEYS_FILE);
+                serviceId = response.data.keys.serviceId || serviceId;
+                processFiles();
             } else {
-                throw new Error("Connessione rifiutata dalla CA");
-            }
-        } catch (error) {
-            if (
-                error.response &&
-                error.response.data &&
-                error.response.data.error &&
-                error.response.data.error.includes("Chiave privata")
-            ) {
-                console.log("La CA richiede la chiave privata. Forzo una nuova registrazione con un nuovo serviceId.");
-                currentServiceId = `DataAcquisition-${Date.now()}`;
-                requestBody.serviceId = currentServiceId;
-                delete requestBody.privateKey;
-            }
-            console.error(`❌ Tentativo ${attempts} fallito: ${error.message}`);
-            if (attempts < maxAttempts) {
-                await new Promise(resolve => setTimeout(resolve, 2000));
-            } else {
-                console.error("❌ Numero massimo di tentativi raggiunto. Uscita.");
+                console.error("❌ La CA non ha fornito le chiavi. Non posso procedere.");
                 process.exit(1);
             }
-        }
-    }
-
-    if (connectionResponse.data.approved) {
-        console.log("✅ Connessione approvata/verificata dalla CA");
-        if (connectionResponse.data.keys) {
-            await fs.writeFile(KEYS_FILE, JSON.stringify(connectionResponse.data.keys, null, 2));
-            console.log("Chiavi ricevute dalla CA e salvate in", KEYS_FILE);
-            serviceId = connectionResponse.data.keys.serviceId || currentServiceId;
-            processFiles();
         } else {
-            console.error("La CA non ha fornito le chiavi. Non posso procedere.");
+            console.error("❌ Registrazione rifiutata dalla CA:", response.data.error || "Registrazione non approvata.");
             process.exit(1);
         }
-    } else {
-        console.error("Connessione rifiutata dalla CA");
+    } catch (error) {
+        let errorMsg = error.message;
+        if (error.response && error.response.data && error.response.data.error) {
+            errorMsg = error.response.data.error;
+        }
+        console.error("❌ Errore nella richiesta di connessione:", errorMsg);
         process.exit(1);
     }
 }

@@ -20,7 +20,8 @@ const PUBLIC_KEYS_FILE = path.join(__dirname, 'public_keys.json');
 // Classe per gestire certificati e informazioni dei servizi
 class CertificateAuthority {
     constructor() {
-        this.certificates = {}; // Chiave: serviceName, valore: { serviceId, owner, description, ipAddress, tailscaleIp, privateKey, publicKey }
+        // Chiave: serviceName, valore: { serviceId, owner, description, ipAddress, tailscaleIp, privateKey, publicKey }
+        this.certificates = {};
         this._loadCertificates();
     }
 
@@ -122,6 +123,7 @@ function askApproval(serviceInfo) {
         console.log(`- IP locale: ${serviceInfo.ipAddress}`);
         console.log(`- IP Tailscale: ${serviceInfo.tailscaleIp || 'non specificato'}`);
         rl.question('👉 Vuoi approvare la connessione? (si/no): ', (answer) => {
+            // Se l'operatore risponde "no", risolvi con false
             resolve(answer.toLowerCase().trim().charAt(0) === 's');
         });
     });
@@ -130,6 +132,10 @@ function askApproval(serviceInfo) {
 /**
  * Endpoint per la registrazione/autenticazione del servizio.
  * Se viene fornito un target nella richiesta verrà rifiutata (vedi endpoint /requestKey).
+ *
+ * Se il client non invia la chiave privata (nuova registrazione),
+ * il CA verifica PRIMA se il serviceId fornito esiste già in uno qualsiasi dei certificati.
+ * Se sì, la registrazione viene immediatamente rifiutata.
  */
 app.post('/connectionRequest', async (req, res) => {
     const serviceInfo = req.body;
@@ -141,34 +147,16 @@ app.post('/connectionRequest', async (req, res) => {
         return res.status(400).json({ error: "Utilizzare l'endpoint /requestKey per richiedere la chiave privata di un target" });
     }
 
-    // Se il servizio è già registrato
-    if (ca.certificates[serviceInfo.serviceName]) {
-        // Se non viene fornita la chiave privata, chiedi approvazione
-        if (!serviceInfo.privateKey) {
-            console.log(`ℹ️ Richiesta di nuova autenticazione per il servizio ${serviceInfo.serviceName} (nessuna chiave privata fornita).`);
-            const approved = await askApproval(serviceInfo);
-            if (approved) {
-                const key = new NodeRSA({ b: 2048 });
-                const privateKey = key.exportKey('private');
-                const publicKey = key.exportKey('public');
-                ca.registerService(serviceInfo, privateKey, publicKey);
-                console.log(`✅ Servizio ${serviceInfo.serviceName} registrato con nuove chiavi.`);
-                return res.json({ approved: true, keys: { privateKey, publicKey } });
-            } else {
-                console.log(`❌ Richiesta di connessione da ${serviceInfo.serviceName} rifiutata.`);
-                return res.json({ approved: false });
-            }
-        } else {
-            // Se viene fornita la chiave privata, verifica che corrisponda
-            if (ca.certificates[serviceInfo.serviceName].privateKey !== serviceInfo.privateKey) {
-                return res.status(401).json({ error: "Autenticazione fallita: chiave privata non valida. Richiedere una nuova autenticazione con un nuovo id." });
-            }
-            console.log(`ℹ️ Il servizio ${serviceInfo.serviceName} è già registrato ed è stato autenticato correttamente.`);
-            const { privateKey, publicKey } = ca.certificates[serviceInfo.serviceName];
-            return res.json({ approved: true, keys: { privateKey, publicKey } });
+    // Nuova registrazione: il client non invia la chiave privata
+    if (!serviceInfo.privateKey) {
+        // Verifica se il serviceId è già presente in uno qualsiasi dei certificati
+        const serviceIdAlreadyExists = Object.values(ca.certificates).some(
+            s => s.serviceId === serviceInfo.serviceId
+        );
+        if (serviceIdAlreadyExists) {
+            return res.status(400).json({ error: "Registrazione rifiutata: esiste già un servizio con questo serviceId. Sostituirlo con un nuovo serviceId oppure utilizzare il metodo di autenticazione." });
         }
-    } else {
-        // Se il servizio non è registrato, chiedi approvazione e registralo
+        // Se il serviceId è unico, mostra il prompt di approvazione
         const approved = await askApproval(serviceInfo);
         if (approved) {
             const key = new NodeRSA({ b: 2048 });
@@ -178,9 +166,20 @@ app.post('/connectionRequest', async (req, res) => {
             console.log(`✅ Servizio ${serviceInfo.serviceName} registrato con nuove chiavi.`);
             return res.json({ approved: true, keys: { privateKey, publicKey } });
         } else {
-            console.log(`❌ Richiesta di connessione da ${serviceInfo.serviceName} rifiutata.`);
-            return res.json({ approved: false });
+            console.log(`❌ Richiesta di connessione da ${serviceInfo.serviceName} rifiutata dall'utente.`);
+            return res.status(400).json({ error: "Registrazione rifiutata dall'utente." });
         }
+    } else {
+        // Richiesta di autenticazione: il client invia la chiave privata
+        if (!ca.certificates[serviceInfo.serviceName]) {
+            return res.status(404).json({ error: "Servizio non registrato" });
+        }
+        if (ca.certificates[serviceInfo.serviceName].privateKey !== serviceInfo.privateKey) {
+            return res.status(401).json({ error: "Autenticazione fallita: chiave privata non valida." });
+        }
+        console.log(`ℹ️ Il servizio ${serviceInfo.serviceName} è già registrato ed è stato autenticato correttamente.`);
+        const { privateKey, publicKey } = ca.certificates[serviceInfo.serviceName];
+        return res.json({ approved: true, keys: { privateKey, publicKey } });
     }
 });
 
