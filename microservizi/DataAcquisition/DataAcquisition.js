@@ -1,4 +1,29 @@
+// dataAcquisition.js
 const USE_TAILSCALE = false; // Imposta a true per usare l'IP Tailscale, false per usare localhost
+const axios = require('axios');
+const os = require('os');
+const fs = require('fs').promises;
+const { MongoClient } = require('mongodb');
+const path = require('path');
+const NodeRSA = require('node-rsa');
+const {
+    generateAESKey,
+    encryptWithAES,
+    encryptAESKeyWithRSA,
+    getPublicKey
+} = require('./encryption');
+
+const KEYS_FILE = './my_keys.json';
+const mongoUrl = 'mongodb://localhost:27017/';
+const dbName = 'sensor_data';
+
+const filePathCO2 = '../DataCO2_Adeunis';
+const filePathTemperature = '../DataTemperature_Adeunis';
+
+const collectionNameCO2 = 'co2_readings';
+const collectionNameTemperature = 'temperature_readings';
+
+let serviceId = 'DataAcquisition-001';
 
 function getTailscaleIP(ipInfo) {
     for (const iface in ipInfo) {
@@ -12,34 +37,6 @@ function getTailscaleIP(ipInfo) {
     }
     return null;
 }
-
-const axios = require('axios');
-const os = require('os');
-const timeout = 0; // tempo (ms) tra il processamento di ogni riga
-const fs = require('fs').promises;
-const { MongoClient } = require('mongodb');
-const path = require('path');
-
-const {
-    generateAESKey,
-    encryptWithAES,
-    encryptAESKeyWithRSA,
-    getPublicKey
-} = require('./encryption');
-
-const mongoUrl = 'mongodb://localhost:27017/';
-const dbName = 'sensor_data';
-
-const filePathCO2 = '../DataCO2_Adeunis';
-const filePathTemperature = '../DataTemperature_Adeunis';
-
-const collectionNameCO2 = 'co2_readings';
-const collectionNameTemperature = 'temperature_readings';
-
-const serviceId = 'DataAcquisition-001'; // ID del servizio
-
-// File locale in cui salvare le chiavi ottenute dalla CA
-const KEYS_FILE = './my_keys.json';
 
 async function processFiles() {
     const client = new MongoClient(mongoUrl);
@@ -59,11 +56,11 @@ async function processFiles() {
         const tempLines = tempData.split('\n').filter(line => line.trim() !== '');
         console.log(`Simulazione rilevazione: ${co2Lines.length} righe CO₂ e ${tempLines.length} righe Temperatura.`);
 
-        // Otteniamo la chiave pubblica di destinazione per cifrare la chiave AES.
-        // (La logica di ottenimento della chiave pubblica è separata e gestita in getPublicKey.)
+        // Ottieni la chiave pubblica per cifrare la chiave AES
         const publicKey = await getPublicKey('DataAcquisition');
 
         let indexCO2 = 0, indexTemp = 0;
+        const timeout = 0; // nessun delay tra le elaborazioni
 
         const intervalId = setInterval(async () => {
             if (indexCO2 < co2Lines.length) {
@@ -154,77 +151,85 @@ async function processFiles() {
 }
 
 async function requestConnection() {
+    let localKeys = null;
     try {
-        let localKeys = null;
-        // Provo a leggere il file delle chiavi se esiste
+        const keysData = await fs.readFile(KEYS_FILE, 'utf8');
+        localKeys = JSON.parse(keysData);
+        console.log("Chiavi locali trovate:", localKeys);
+    } catch (err) {
+        console.log("Nessun file di chiavi trovato, attendo che la CA mi fornisca le chiavi...");
+    }
+
+    const ipInfo = os.networkInterfaces();
+    const baseURL = USE_TAILSCALE
+        ? `http://${getTailscaleIP(ipInfo)}:3000`
+        : 'http://localhost:3000';
+    const url = `${baseURL}/connectionRequest`;
+
+    let currentServiceId = serviceId;
+    const requestBody = {
+        serviceName: 'DataAcquisition',
+        serviceId: currentServiceId,
+        description: 'Servizio per l’elaborazione dei dati dei sensori',
+        owner: 'Company123',
+        ipAddress: ipInfo
+    };
+
+    if (localKeys && localKeys.privateKey) {
+        requestBody.privateKey = localKeys.privateKey;
+    }
+
+    let attempts = 0;
+    const maxAttempts = 3;
+    let connectionResponse = null;
+    let success = false;
+    while (attempts < maxAttempts && !success) {
         try {
-            const keysData = await fs.readFile(KEYS_FILE, 'utf8');
-            localKeys = JSON.parse(keysData);
-            console.log("Chiavi locali trovate:", localKeys);
-        } catch (err) {
-            console.log("Nessun file di chiavi trovato, attendo che la CA mi fornisca le chiavi...");
-        }
-
-        // Recupera informazioni sull'IP (adattare se necessario)
-        const ipInfo = os.networkInterfaces();
-        const baseURL = USE_TAILSCALE ? `http://${getTailscaleIP(ipInfo)}:3000` : 'http://localhost:3000';
-        const url = `${baseURL}/connectionRequest`;
-        const requestBody = {
-            serviceName: 'DataAcquisition',
-            serviceId,
-            description: 'Servizio per l’elaborazione dei dati dei sensori',
-            owner: 'Company123',
-            ipAddress: ipInfo
-        };
-
-        // Se ho già una chiave locale, la invio per autenticare il servizio registrato
-        if (localKeys && localKeys.privateKey) {
-            requestBody.privateKey = localKeys.privateKey;
-        }
-
-        let attempts = 0;
-        const maxAttempts = 3;
-        let connectionResponse = null;
-        let success = false;
-        while (attempts < maxAttempts && !success) {
-            try {
-                attempts++;
-                console.log(`🔗 Inviando richiesta di connessione alla CA... Tentativo ${attempts}`);
-                connectionResponse = await axios.post(url, requestBody);
-                if (connectionResponse.data.approved) {
-                    success = true;
-                } else {
-                    throw new Error("Connessione rifiutata dalla CA");
-                }
-            } catch (error) {
-                console.error(`❌ Tentativo ${attempts} fallito: ${error.message}`);
-                if (attempts < maxAttempts) {
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                } else {
-                    console.error("❌ Numero massimo di tentativi raggiunto. Uscita.");
-                    process.exit(1);
-                }
-            }
-        }
-
-        if (connectionResponse.data.approved) {
-            console.log("✅ Connessione approvata/verificata dalla CA");
-            if (connectionResponse.data.keys) {
-                await fs.writeFile(KEYS_FILE, JSON.stringify(connectionResponse.data.keys, null, 2));
-                console.log("Chiavi ricevute dalla CA e salvate in", KEYS_FILE);
-                processFiles();
+            attempts++;
+            console.log(`🔗 Inviando richiesta di connessione alla CA... Tentativo ${attempts}`);
+            connectionResponse = await axios.post(url, requestBody);
+            if (connectionResponse.data.approved) {
+                success = true;
             } else {
-                console.error("❌ La CA non ha fornito le chiavi. Non posso procedere.");
+                throw new Error("Connessione rifiutata dalla CA");
+            }
+        } catch (error) {
+            if (
+                error.response &&
+                error.response.data &&
+                error.response.data.error &&
+                error.response.data.error.includes("Chiave privata")
+            ) {
+                console.log("La CA richiede la chiave privata. Forzo una nuova registrazione con un nuovo serviceId.");
+                currentServiceId = `DataAcquisition-${Date.now()}`;
+                requestBody.serviceId = currentServiceId;
+                delete requestBody.privateKey;
+            }
+            console.error(`❌ Tentativo ${attempts} fallito: ${error.message}`);
+            if (attempts < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            } else {
+                console.error("❌ Numero massimo di tentativi raggiunto. Uscita.");
                 process.exit(1);
             }
+        }
+    }
+
+    if (connectionResponse.data.approved) {
+        console.log("✅ Connessione approvata/verificata dalla CA");
+        if (connectionResponse.data.keys) {
+            await fs.writeFile(KEYS_FILE, JSON.stringify(connectionResponse.data.keys, null, 2));
+            console.log("Chiavi ricevute dalla CA e salvate in", KEYS_FILE);
+            serviceId = connectionResponse.data.keys.serviceId || currentServiceId;
+            processFiles();
         } else {
-            console.error("❌ Connessione rifiutata dalla CA");
+            console.error("La CA non ha fornito le chiavi. Non posso procedere.");
             process.exit(1);
         }
-    } catch (error) {
-        console.error("Errore durante la richiesta di connessione a CA:", error.message);
+    } else {
+        console.error("Connessione rifiutata dalla CA");
         process.exit(1);
     }
 }
-//saa
+
 requestConnection();
