@@ -133,22 +133,34 @@ const ca = new CertificateAuthority();
 /**
  * Gestione delle STORAGE KEYS per il DB.
  * Se il file non esiste, generiamo (es. 3 chiavi AES a 256 bit).
+ *
+ * Modifiche apportate:
+ * - Al posto di un semplice campo "id", generiamo per ciascuna storage key:
+ *   - un "masterId" interno
+ *   - un array di "alias" (stringhe casuali lunghe) che vengono usati come riferimento (campo "refCode" nel DB)
+ *   In questo modo, per la stessa chiave, vengono usati alias differenti per rendere più complessa una decifratura non autorizzata.
  */
 let storageKeys = [];
 function loadOrGenerateStorageKeys() {
     if (fs.existsSync(STORAGE_KEYS_FILE)) {
         try {
             const data = JSON.parse(fs.readFileSync(STORAGE_KEYS_FILE, 'utf8'));
-            storageKeys = data; // Array di oggetti { id, key }
+            storageKeys = data; // Array di oggetti { masterId, aliases, key }
             console.log("✅ Storage keys loaded.");
         } catch (err) {
             console.error("Errore nel caricamento di storage_keys.json:", err);
         }
     } else {
         storageKeys = [];
-        for (let i = 1; i <= 3; i++) {
+        // Genera 3 storage keys, ognuna con 3 alias differenti
+        for (let i = 0; i < 3; i++) {
             const keyBuffer = crypto.randomBytes(32);
-            storageKeys.push({ id: i, key: keyBuffer.toString('hex') });
+            const masterId = crypto.randomBytes(16).toString('hex'); // stringa lunga 32 caratteri
+            const aliases = [];
+            for (let j = 0; j < 3; j++) {
+                aliases.push(crypto.randomBytes(16).toString('hex')); // alias lunghi 32 caratteri
+            }
+            storageKeys.push({ masterId, aliases, key: keyBuffer.toString('hex') });
         }
         fs.writeFileSync(STORAGE_KEYS_FILE, JSON.stringify(storageKeys, null, 2));
         console.log("✅ Nuove storage keys generate e salvate.");
@@ -156,11 +168,12 @@ function loadOrGenerateStorageKeys() {
 }
 loadOrGenerateStorageKeys();
 
-// Utility: scegli una storage key a caso
+// Utility: scegli una storage key a caso e un suo alias
 function chooseStorageKey() {
     if (storageKeys.length === 0) throw new Error("Nessuna storage key disponibile.");
-    const index = Math.floor(Math.random() * storageKeys.length);
-    return storageKeys[index];
+    const storageKeyObj = storageKeys[Math.floor(Math.random() * storageKeys.length)];
+    const alias = storageKeyObj.aliases[Math.floor(Math.random() * storageKeyObj.aliases.length)];
+    return { storageKeyObj, alias };
 }
 
 // Interfaccia readline per approvazioni manuali
@@ -250,10 +263,12 @@ app.post('/submitData', async (req, res) => {
     } catch (err) {
         return res.status(500).json({ error: "Errore nella decrittazione dei dati: " + err.message });
     }
-    let storageKeyObj = chooseStorageKey();
     let storageIV = crypto.randomBytes(16);
     let storageEncryptedData;
+    let chosenAlias;
     try {
+        const { storageKeyObj, alias } = chooseStorageKey();
+        chosenAlias = alias; // alias scelto casualmente per questo salvataggio
         const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(storageKeyObj.key, 'hex'), storageIV);
         storageEncryptedData = cipher.update(plaintext, 'utf8', 'hex');
         storageEncryptedData += cipher.final('hex');
@@ -271,7 +286,8 @@ app.post('/submitData', async (req, res) => {
             serviceId,
             encryptedData: storageEncryptedData,
             iv: storageIV.toString('hex'),
-            dbKeyId: storageKeyObj.id,
+            // Salviamo l'alias scelto in un campo "refCode", in modo da non svelare che si tratta della chiave
+            refCode: chosenAlias,
             timestamp: new Date()
         });
         await client.close();
@@ -308,8 +324,9 @@ app.post('/requestKey', async (req, res) => {
             const records = await collection.find({ serviceId: target.serviceId }).toArray();
             for (const record of records) {
                 try {
-                    const storageKeyObj = storageKeys.find(k => k.id === record.dbKeyId);
-                    if (!storageKeyObj) throw new Error("Storage key non trovata per dbKeyId " + record.dbKeyId);
+                    // Recupera la storage key cercando l'alias salvato nel campo "refCode"
+                    const storageKeyObj = storageKeys.find(k => k.aliases.includes(record.refCode));
+                    if (!storageKeyObj) throw new Error("Storage key non trovata per refCode " + record.refCode);
                     const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(storageKeyObj.key, 'hex'), Buffer.from(record.iv, 'hex'));
                     let decrypted = decipher.update(Buffer.from(record.encryptedData, 'hex'), undefined, 'utf8');
                     decrypted += decipher.final('utf8');
