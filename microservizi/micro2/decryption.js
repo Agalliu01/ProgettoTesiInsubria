@@ -1,11 +1,20 @@
 // dataDecryption.js
+const USE_TAILSCALE = false; // Imposta a true per usare l'IP Tailscale, false per usare localhost
 const axios = require('axios');
-const fs = require('fs').promises;
 const os = require('os');
+const fs = require('fs').promises;
+const { MongoClient } = require('mongodb');
 const NodeRSA = require('node-rsa');
+const crypto = require('crypto');
 const path = require('path');
 
-const USE_TAILSCALE = false; // Imposta a true per usare l'IP Tailscale
+const KEYS_FILE = './my_keys_decryption.json';
+const mongoUrl = 'mongodb://localhost:27017/';
+const dbName = 'sensor_data';
+const collectionNameCO2 = 'co2_readings';
+let localKeys = null;
+let keyCache = {}; // Cache per le chiavi private dei target
+
 function getTailscaleIP(ipInfo) {
     for (const iface in ipInfo) {
         if (iface.toLowerCase().includes('tailscale')) {
@@ -16,135 +25,207 @@ function getTailscaleIP(ipInfo) {
             }
         }
     }
-    return 'localhost';
+    return null;
 }
-async function getBaseURL() {
-    const ipInfo = os.networkInterfaces();
-    return USE_TAILSCALE ? `http://${getTailscaleIP(ipInfo)}:3000` : 'http://localhost:3000';
-}
-
-const KEYS_FILE = './my_keys_decryption.json'; // File locale per le chiavi di DataDecryption
-const SERVICE_NAME = 'DataDecryption';
-const SERVICE_ID = 'DataDecryption-001';
 
 /**
- * Richiede la connessione (registrazione o autenticazione) al CA.
+ * Funzione per autenticare il client (challenge–response).
+ */
+async function authenticateClient() {
+    const ipInfo = os.networkInterfaces();
+    const baseURL = USE_TAILSCALE && getTailscaleIP(ipInfo)
+        ? `http://${getTailscaleIP(ipInfo)}:3000`
+        : 'http://localhost:3000';
+
+    try {
+        // 1. Richiedi un token al CA
+        const tokenResponse = await axios.post(`${baseURL}/generateToken`, {
+            serviceName: 'DataDecryption'
+        }, { timeout: 10000 });
+        const token = tokenResponse.data.token;
+        console.log(`🔑 Token ricevuto: ${token}`);
+
+        // 2. Firma il token con la chiave privata
+        const key = new NodeRSA(localKeys.privateKey);
+        const signature = key.sign(token, 'base64', 'utf8');
+        console.log(`🖋 Firma generata: ${signature}`);
+
+        // 3. Invia la firma per autenticarti
+        const authResponse = await axios.post(`${baseURL}/authenticate`, {
+            serviceName: 'DataDecryption',
+            signature
+        }, { timeout: 10000 });
+
+        if (authResponse.data.authenticated) {
+            console.log("✅ Autenticazione completata con successo!");
+            // Procede con la decrittazione
+            decryptData();
+        } else {
+            console.error("❌ Autenticazione non riuscita");
+            process.exit(1);
+        }
+    } catch (err) {
+        console.error("❌ Errore durante il processo di autenticazione:", err.message);
+        process.exit(1);
+    }
+}
+
+/**
+ * Funzione per richiedere la connessione al CA.
  */
 async function requestConnection() {
-    let localKeys = null;
     try {
         const data = await fs.readFile(KEYS_FILE, 'utf8');
         localKeys = JSON.parse(data);
-        console.log("✅ Chiavi locali trovate:", localKeys);
+        console.log("✅ Chiavi locali trovate.");
     } catch (err) {
-        console.log("⚠️ Nessun file di chiavi trovato, richiedo connessione al CA...");
+        console.log("⚠️ Nessun file di chiavi trovato, attendo che la CA mi fornisca le chiavi...");
     }
 
     const ipInfo = os.networkInterfaces();
-    const baseURL = USE_TAILSCALE ? `http://${getTailscaleIP(ipInfo)}:3000` : 'http://localhost:3000';
+    const baseURL = USE_TAILSCALE && getTailscaleIP(ipInfo)
+        ? `http://${getTailscaleIP(ipInfo)}:3000`
+        : 'http://localhost:3000';
     const url = `${baseURL}/connectionRequest`;
     const requestBody = {
-        serviceName: SERVICE_NAME,
-        serviceId: SERVICE_ID,
-        description: 'Servizio per lettura/decrittazione dati',
+        serviceName: 'DataDecryption',
+        serviceId: 'DataDecryption-001',
+        description: 'Servizio per decrittazione dei dati',
         owner: 'Company123',
-        ipAddress: ipInfo,
-        loadData: false
+        ipAddress: ipInfo
     };
     if (localKeys && localKeys.privateKey) {
         requestBody.privateKey = localKeys.privateKey;
     }
 
     try {
-        console.log("🔗 Inviando richiesta di connessione al CA...");
+        console.log("🔗 Inviando richiesta di connessione alla CA...");
         const response = await axios.post(url, requestBody, { timeout: 10000 });
-        if (response.data.approved) {
-            console.log("✅ Connessione approvata dal CA");
-            if (response.data.keys) {
-                localKeys = response.data.keys;
-                await fs.writeFile(KEYS_FILE, JSON.stringify(localKeys, null, 2));
-                console.log("🔑 Chiavi salvate in", KEYS_FILE);
-            }
-            return localKeys;
+        console.log("✅ Risposta della CA ricevuta.");
+        if (response.data.approved && response.data.keys) {
+            localKeys = response.data.keys;
+            await fs.writeFile(KEYS_FILE, JSON.stringify(localKeys, null, 2));
+            console.log("🔑 Chiavi ricevute dalla CA e salvate in", KEYS_FILE);
+            // Avvia il challenge–response per autenticarsi
+            authenticateClient();
         } else {
-            console.error("❌ Connessione rifiutata:", response.data.error);
+            console.error("❌ Registrazione rifiutata dalla CA:", response.data.error || "Registrazione non approvata.");
             process.exit(1);
         }
-    } catch (err) {
-        console.error("❌ Errore nella richiesta di connessione:", err.message);
+    } catch (error) {
+        let errorMsg = error.message;
+        if (error.response && error.response.data && error.response.data.error) {
+            errorMsg = error.response.data.error;
+        }
+        console.error("❌ Errore nella richiesta di connessione:", errorMsg);
         process.exit(1);
     }
 }
 
 /**
- * Richiede i dati relativi a un target (ad es. DataAcquisition) tramite il CA.
- * Dopo che il CA ha decriptato i dati dal DB, li ri-encripta usando la chiave pubblica del richiedente,
- * così che solo il richiedente (che possiede la sua chiave privata) possa decriptarli.
+ * Funzione per richiedere la chiave privata di un target.
  */
-async function requestDecryptedData(targetServiceId) {
-    const localKeys = await requestConnection();
-    const baseURL = await getBaseURL();
-    const url = `${baseURL}/requestKey`;
-    const payload = {
-        requesterServiceId: SERVICE_ID,
-        requesterPrivateKey: localKeys.privateKey,
-        targetServiceId // Es. "DataAcquisition-001"
-    };
+async function getTargetPrivateKey(targetServiceId) {
+    if (keyCache[targetServiceId]) {
+        return keyCache[targetServiceId];
+    }
     try {
-        const response = await axios.post(url, payload, { timeout: 15000 });
-        if (response.data.data) {
-            return response.data.data; // Array di record ri‑cifrati per il richiedente
-        } else if(response.data.message) {
-            console.log(response.data.message);
-            return [];
+        console.log(`🔍 Richiesta chiave privata per il target ${targetServiceId} alla CA...`);
+        const ipInfo = os.networkInterfaces();
+        const baseURL = USE_TAILSCALE && getTailscaleIP(ipInfo)
+            ? `http://${getTailscaleIP(ipInfo)}:3000`
+            : 'http://localhost:3000';
+        const url = `${baseURL}/requestKey`;
+        const response = await axios.post(url, {
+            requesterServiceId: 'DataDecryption-001',
+            requesterPrivateKey: localKeys.privateKey,
+            targetServiceId
+        }, { timeout: 10000 });
+        if (response.data && response.data.privateKey) {
+            console.log(`✅ Chiave privata ricevuta per il target ${targetServiceId}.`);
+            keyCache[targetServiceId] = response.data.privateKey;
+            return response.data.privateKey;
         } else {
-            console.error("❌ Nessun dato ricevuto:", response.data.error);
-            return [];
+            throw new Error(`Chiave privata non ricevuta per ${targetServiceId}.`);
         }
     } catch (err) {
-        console.error("❌ Errore nella richiesta dei dati:", err.message);
+        console.error(`❌ Errore nel recupero della chiave per ${targetServiceId}:`, err.message);
         throw err;
     }
 }
 
 /**
- * Decripta una stringa cifrata con RSA, usando la chiave privata.
+ * Decripta la chiave AES utilizzando RSA.
  */
-function decryptRSAEncryptedData(encryptedData, privateKeyStr) {
+function decryptAESKeyWithRSA(encryptedAESKey, privateKey) {
     try {
-        const rsa = new NodeRSA(privateKeyStr);
-        return rsa.decrypt(encryptedData, 'utf8');
+        const key = new NodeRSA(privateKey);
+        if (!key.isPrivate()) throw new Error('Chiave privata non valida.');
+        return key.decrypt(Buffer.from(encryptedAESKey, 'hex'));
     } catch (err) {
-        console.error("❌ Errore nella decriptazione RSA:", err.message);
+        console.error("❌ Errore nella decrittazione della chiave AES:", err.message);
         throw err;
     }
 }
 
 /**
- * Recupera e processa i dati ricevuti dal CA.
- * Se non vengono trovati record, stampa un messaggio appropriato.
+ * Decripta i dati cifrati utilizzando AES.
  */
-async function processDecryptedData() {
-    const targetServiceId = 'DataAcquisition-001';
+function decryptWithAES(encryptedData, aesKey, iv) {
     try {
-        const records = await requestDecryptedData(targetServiceId);
-        if (records.length === 0) {
-            console.log("✅ Nessun record da decriptare per il target specificato.");
+        const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, Buffer.from(iv, 'hex'));
+        let decrypted = decipher.update(Buffer.from(encryptedData, 'hex'), 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        return decrypted;
+    } catch (err) {
+        console.error("❌ Errore nella decrittazione dei dati:", err.message);
+        throw err;
+    }
+}
+
+/**
+ * Funzione principale per decrittare i dati memorizzati su MongoDB.
+ */
+async function decryptData() {
+    console.log("🔐 Avvio processo di decrittazione...");
+    try {
+        const client = new MongoClient(mongoUrl);
+        await client.connect();
+        console.log("✅ Connessione a MongoDB stabilita.");
+        const db = client.db(dbName);
+        const collection = db.collection(collectionNameCO2);
+        const records = await collection.find().toArray();
+
+        if (!records.length) {
+            console.log("⚠️ Nessun dato trovato.");
+            await client.close();
             return;
         }
-        console.log(`✅ Ricevuti ${records.length} record per il target ${targetServiceId}`);
-        const localKeys = JSON.parse(await fs.readFile(KEYS_FILE, 'utf8'));
-        records.forEach(record => {
+
+        for (const record of records) {
             try {
-                const decrypted = decryptRSAEncryptedData(record.data, localKeys.privateKey);
-                console.log(`Record da ${record.collection} (ID: ${record.recordId}):`, decrypted);
+                const targetServiceId = record.serviceId;
+                const targetPrivateKey = await getTargetPrivateKey(targetServiceId);
+                const aesKey = decryptAESKeyWithRSA(record.encryptedAESKey, targetPrivateKey);
+                const decryptedData = decryptWithAES(record.encryptedData, aesKey, record.iv);
+                console.log(`✅ Dati decriptati per ${targetServiceId}:`, decryptedData);
             } catch (err) {
-                console.error(`❌ Errore decriptando il record ${record.recordId}:`, err.message);
+                console.error("❌ Errore nella decrittazione del record:", err.message);
+                break;
             }
-        });
+        }
+        await client.close();
+        console.log("✅ Connessione a MongoDB chiusa.");
     } catch (err) {
-        console.error("❌ Errore nel processo di decriptazione:", err.message);
+        console.error("❌ Errore nel processo di decrittazione:", err.message);
     }
 }
 
-processDecryptedData();
+/**
+ * Funzione main: avvia la richiesta di connessione e successivamente l'autenticazione.
+ */
+async function main() {
+    await requestConnection();
+}
+
+main();

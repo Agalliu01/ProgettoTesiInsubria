@@ -1,78 +1,64 @@
 // ca.js
-const USE_TAILSCALE = false; // Imposta a true per usare l'IP Tailscale, false per usare tutte le interfacce
-const os = require('os');
-function getTailscaleIP() {
-    const interfaces = os.networkInterfaces();
-    for (const name in interfaces) {
-        if (name.toLowerCase().includes('tailscale')) {
-            for (const iface of interfaces[name]) {
-                if (iface.family === 'IPv4' && !iface.internal) {
-                    return iface.address;
-                }
-            }
-        }
-    }
-    return '0.0.0.0';
-}
-const HOST = USE_TAILSCALE ? getTailscaleIP() : '0.0.0.0';
-
-const PORT = 3000;
+const USE_LOCALHOST = false; // Imposta a false per ascoltare su tutte le interfacce
+const HOST = USE_LOCALHOST ? 'localhost' : '0.0.0.0';
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const NodeRSA = require('node-rsa');
-const { MongoClient } = require('mongodb');
-const crypto = require('crypto');
 const readline = require('readline');
-
+const NodeRSA = require('node-rsa');
+const os = require('os');
+const crypto = require('crypto');
 const app = express();
+const PORT = 3000;
+
+// Middleware per il parsing del JSON
 app.use(express.json());
 
-// FILES per le chiavi dei servizi
+// Percorsi dei file per le chiavi
 const PRIVATE_KEYS_FILE = path.join(__dirname, 'private_keys.json');
 const PUBLIC_KEYS_FILE = path.join(__dirname, 'public_keys.json');
-// File per le STORAGE KEYS usate per cifrare i dati nel DB (generiamo es. 3 chiavi)
-const STORAGE_KEYS_FILE = path.join(__dirname, 'storage_keys.json');
 
 /**
- * Classe CA: gestisce registrazione, autenticazione e memorizzazione delle chiavi.
- * Memorizza anche il flag "loadData" (se il servizio può inviare dati).
+ * Classe per gestire i certificati e le informazioni dei servizi.
+ * Include la gestione dei token per l’autenticazione challenge–response.
  */
 class CertificateAuthority {
     constructor() {
-        // struttura: { serviceName: { serviceId, owner, description, ipAddress, tailscaleIp, privateKey, publicKey, loadData } }
+        // Certificati: chiave = serviceName, valore = { serviceId, owner, description, ipAddress, tailscaleIp, privateKey, publicKey }
         this.certificates = {};
+        // Oggetto per memorizzare i token di challenge in attesa di verifica: { serviceName: token }
+        this.pendingTokens = {};
         this._loadCertificates();
     }
 
     _loadCertificates() {
-        // Carica le chiavi private (con il flag loadData)
+        // Carica le chiavi private
         if (fs.existsSync(PRIVATE_KEYS_FILE)) {
             try {
-                const data = JSON.parse(fs.readFileSync(PRIVATE_KEYS_FILE, 'utf8'));
-                for (const [serviceName, { serviceId, key, loadData }] of Object.entries(data)) {
-                    this.certificates[serviceName] = { serviceId, privateKey: key, loadData };
+                const privateData = JSON.parse(fs.readFileSync(PRIVATE_KEYS_FILE, 'utf8'));
+                for (const [serviceName, { serviceId, key }] of Object.entries(privateData)) {
+                    this.certificates[serviceName] = { serviceId, privateKey: key };
                 }
             } catch (e) {
-                console.error("Errore nel caricare file private_keys.json:", e);
+                console.error("Errore nel caricare il file delle chiavi private:", e);
             }
         }
         // Carica le chiavi pubbliche
         if (fs.existsSync(PUBLIC_KEYS_FILE)) {
             try {
-                const data = JSON.parse(fs.readFileSync(PUBLIC_KEYS_FILE, 'utf8'));
-                for (const [serviceName, { serviceId, key }] of Object.entries(data)) {
+                const publicData = JSON.parse(fs.readFileSync(PUBLIC_KEYS_FILE, 'utf8'));
+                for (const [serviceName, { serviceId, key }] of Object.entries(publicData)) {
                     if (this.certificates[serviceName]) {
                         this.certificates[serviceName].publicKey = key;
                     }
                 }
             } catch (e) {
-                console.error("Errore nel caricare file public_keys.json:", e);
+                console.error("Errore nel caricare il file delle chiavi pubbliche:", e);
             }
         }
     }
 
-    // Registra o aggiorna un servizio (memorizza anche il flag loadData)
+    // Registra o aggiorna un servizio
     registerService(serviceInfo, privateKey, publicKey) {
         this.certificates[serviceInfo.serviceName] = {
             serviceId: serviceInfo.serviceId,
@@ -81,15 +67,14 @@ class CertificateAuthority {
             ipAddress: serviceInfo.ipAddress,
             tailscaleIp: serviceInfo.tailscaleIp,
             privateKey,
-            publicKey,
-            loadData: serviceInfo.loadData || false
+            publicKey
         };
-        this._updateKeyFile(PRIVATE_KEYS_FILE, serviceInfo.serviceName, serviceInfo.serviceId, privateKey, serviceInfo.loadData);
+        this._updateKeyFile(PRIVATE_KEYS_FILE, serviceInfo.serviceName, serviceInfo.serviceId, privateKey);
         this._updateKeyFile(PUBLIC_KEYS_FILE, serviceInfo.serviceName, serviceInfo.serviceId, publicKey);
     }
 
     // Aggiorna il file JSON specificato
-    _updateKeyFile(filePath, serviceName, serviceId, key, loadData) {
+    _updateKeyFile(filePath, serviceName, serviceId, key) {
         let data = {};
         if (fs.existsSync(filePath)) {
             try {
@@ -98,14 +83,11 @@ class CertificateAuthority {
                 console.error("Errore nel parsing di", filePath, e);
             }
         }
-        if (filePath === PRIVATE_KEYS_FILE) {
-            data[serviceName] = { serviceId, key, loadData };
-        } else {
-            data[serviceName] = { serviceId, key };
-        }
+        data[serviceName] = { serviceId, key };
         fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
     }
 
+    // Ritorna la chiave (pubblica o privata) di un servizio
     loadKey(serviceName, type) {
         const filePath = type === 'private' ? PRIVATE_KEYS_FILE : PUBLIC_KEYS_FILE;
         if (fs.existsSync(filePath)) {
@@ -120,6 +102,7 @@ class CertificateAuthority {
         return null;
     }
 
+    // Autentica un servizio confrontando la chiave privata (metodo legacy usato in /connectionRequest)
     authenticateService(serviceName, providedPrivateKey) {
         return (
             this.certificates[serviceName] &&
@@ -130,57 +113,12 @@ class CertificateAuthority {
 
 const ca = new CertificateAuthority();
 
-/**
- * Gestione delle STORAGE KEYS per il DB.
- * Se il file non esiste, generiamo (es. 3 chiavi AES a 256 bit).
- *
- * Modifiche apportate:
- * - Al posto di un semplice campo "id", generiamo per ciascuna storage key:
- *   - un "masterId" interno
- *   - un array di "alias" (stringhe casuali lunghe) che vengono usati come riferimento (campo "refCode" nel DB)
- *   In questo modo, per la stessa chiave, vengono usati alias differenti per rendere più complessa una decifratura non autorizzata.
- */
-let storageKeys = [];
-function loadOrGenerateStorageKeys() {
-    if (fs.existsSync(STORAGE_KEYS_FILE)) {
-        try {
-            const data = JSON.parse(fs.readFileSync(STORAGE_KEYS_FILE, 'utf8'));
-            storageKeys = data; // Array di oggetti { masterId, aliases, key }
-            console.log("✅ Storage keys loaded.");
-        } catch (err) {
-            console.error("Errore nel caricamento di storage_keys.json:", err);
-        }
-    } else {
-        storageKeys = [];
-        // Genera 3 storage keys, ognuna con 3 alias differenti
-        for (let i = 0; i < 3; i++) {
-            const keyBuffer = crypto.randomBytes(32);
-            const masterId = crypto.randomBytes(16).toString('hex'); // stringa lunga 32 caratteri
-            const aliases = [];
-            for (let j = 0; j < 3; j++) {
-                aliases.push(crypto.randomBytes(16).toString('hex')); // alias lunghi 32 caratteri
-            }
-            storageKeys.push({ masterId, aliases, key: keyBuffer.toString('hex') });
-        }
-        fs.writeFileSync(STORAGE_KEYS_FILE, JSON.stringify(storageKeys, null, 2));
-        console.log("✅ Nuove storage keys generate e salvate.");
-    }
-}
-loadOrGenerateStorageKeys();
-
-// Utility: scegli una storage key a caso e un suo alias
-function chooseStorageKey() {
-    if (storageKeys.length === 0) throw new Error("Nessuna storage key disponibile.");
-    const storageKeyObj = storageKeys[Math.floor(Math.random() * storageKeys.length)];
-    const alias = storageKeyObj.aliases[Math.floor(Math.random() * storageKeyObj.aliases.length)];
-    return { storageKeyObj, alias };
-}
-
-// Interfaccia readline per approvazioni manuali
+// Interfaccia readline per il prompt di approvazione
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
 });
+
 function askApproval(serviceInfo) {
     return new Promise((resolve) => {
         console.log("\nRichiesta di connessione ricevuta:");
@@ -190,27 +128,35 @@ function askApproval(serviceInfo) {
         console.log(`- Proprietario: ${serviceInfo.owner}`);
         console.log(`- IP locale: ${serviceInfo.ipAddress}`);
         console.log(`- IP Tailscale: ${serviceInfo.tailscaleIp || 'non specificato'}`);
-        console.log(`- Carica dati sul DB: ${serviceInfo.loadData ? "SI" : "NO"}`);
         rl.question('👉 Vuoi approvare la connessione? (si/no): ', (answer) => {
             resolve(answer.toLowerCase().trim().charAt(0) === 's');
         });
     });
 }
 
-// Endpoint di registrazione/autenticazione
+/**
+ * Endpoint per la registrazione/autenticazione del servizio.
+ * Se non viene fornita la chiave privata si considera una nuova registrazione.
+ */
 app.post('/connectionRequest', async (req, res) => {
     const serviceInfo = req.body;
     if (!serviceInfo.serviceName || !serviceInfo.serviceId) {
         return res.status(400).json({ error: "Il nome e l'ID del servizio sono obbligatori" });
     }
     if (serviceInfo.targetServiceId) {
-        return res.status(400).json({ error: "Utilizzare l'endpoint /requestKey per richiedere dati di un target" });
+        return res.status(400).json({ error: "Utilizzare l'endpoint /requestKey per richiedere la chiave privata di un target" });
     }
+
+    // Nuova registrazione: il client non invia la chiave privata
     if (!serviceInfo.privateKey) {
-        const serviceIdAlreadyExists = Object.values(ca.certificates).some(s => s.serviceId === serviceInfo.serviceId);
+        // Verifica se il serviceId è già presente
+        const serviceIdAlreadyExists = Object.values(ca.certificates).some(
+            s => s.serviceId === serviceInfo.serviceId
+        );
         if (serviceIdAlreadyExists) {
-            return res.status(400).json({ error: "Registrazione rifiutata: esiste già un servizio con questo serviceId. Usa un nuovo serviceId oppure autenticati." });
+            return res.status(400).json({ error: "Registrazione rifiutata: esiste già un servizio con questo serviceId. Utilizzare il metodo di autenticazione." });
         }
+        // Mostra il prompt per l'approvazione
         const approved = await askApproval(serviceInfo);
         if (approved) {
             const key = new NodeRSA({ b: 2048 });
@@ -220,152 +166,120 @@ app.post('/connectionRequest', async (req, res) => {
             console.log(`✅ Servizio ${serviceInfo.serviceName} registrato con nuove chiavi.`);
             return res.json({ approved: true, keys: { privateKey, publicKey } });
         } else {
-            console.log(`❌ Richiesta di connessione da ${serviceInfo.serviceName} rifiutata.`);
+            console.log(`❌ Richiesta di connessione da ${serviceInfo.serviceName} rifiutata dall'utente.`);
             return res.status(400).json({ error: "Registrazione rifiutata dall'utente." });
         }
     } else {
+        // Richiesta di autenticazione legacy: il client invia la chiave privata
         if (!ca.certificates[serviceInfo.serviceName]) {
             return res.status(404).json({ error: "Servizio non registrato" });
         }
         if (ca.certificates[serviceInfo.serviceName].privateKey !== serviceInfo.privateKey) {
             return res.status(401).json({ error: "Autenticazione fallita: chiave privata non valida." });
         }
-        console.log(`ℹ️ Servizio ${serviceInfo.serviceName} autenticato correttamente.`);
+        console.log(`ℹ️ Il servizio ${serviceInfo.serviceName} è stato autenticato correttamente (metodo legacy).`);
         const { privateKey, publicKey } = ca.certificates[serviceInfo.serviceName];
         return res.json({ approved: true, keys: { privateKey, publicKey } });
     }
 });
 
-// Endpoint per la sottomissione dati (DataAcquisition)
-app.post('/submitData', async (req, res) => {
-    const { serviceId, privateKey, record } = req.body;
-    if (!serviceId || !privateKey || !record || !record.collection || !record.encryptedData || !record.iv || !record.encryptedAESKey) {
-        return res.status(400).json({ error: "Dati incompleti. Campi obbligatori: serviceId, privateKey, record { collection, encryptedData, iv, encryptedAESKey }" });
+/**
+ * Endpoint per generare un token di challenge per il client.
+ * Il client dovrà firmare questo token con la sua chiave privata.
+ */
+app.post('/generateToken', (req, res) => {
+    const { serviceName } = req.body;
+    if (!serviceName || !ca.certificates[serviceName]) {
+        return res.status(404).json({ error: "Servizio non registrato" });
     }
-    const service = Object.values(ca.certificates).find(s => s.serviceId === serviceId);
-    if (!service) return res.status(404).json({ error: "Servizio non registrato" });
-    if (service.privateKey !== privateKey) return res.status(401).json({ error: "Autenticazione fallita" });
-    if (!service.loadData) {
-        return res.status(403).json({ error: "Il servizio non è autorizzato a caricare dati sul DB" });
+    // Genera un token casuale
+    const token = crypto.randomBytes(32).toString('hex');
+    // Salva il token associato al serviceName
+    ca.pendingTokens[serviceName] = token;
+    console.log(`🔐 Token generato per ${serviceName}: ${token}`);
+    res.json({ token });
+});
+
+/**
+ * Endpoint per verificare la firma inviata dal client.
+ * Viene usata la chiave pubblica registrata per verificare la firma del token.
+ */
+app.post('/authenticate', (req, res) => {
+    const { serviceName, signature } = req.body;
+    if (!serviceName || !signature) {
+        return res.status(400).json({ error: "Richiesta incompleta: serviceName e signature sono obbligatori" });
     }
-    let aesKey;
-    try {
-        const rsa = new NodeRSA(service.privateKey);
-        aesKey = rsa.decrypt(Buffer.from(record.encryptedAESKey, 'hex'));
-    } catch (err) {
-        return res.status(500).json({ error: "Errore nella decrittazione della chiave AES: " + err.message });
+    const token = ca.pendingTokens[serviceName];
+    if (!token) {
+        return res.status(400).json({ error: "Token non trovato o scaduto per il servizio" });
     }
-    let plaintext;
-    try {
-        const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, Buffer.from(record.iv, 'hex'));
-        plaintext = decipher.update(Buffer.from(record.encryptedData, 'hex'), undefined, 'utf8');
-        plaintext += decipher.final('utf8');
-    } catch (err) {
-        return res.status(500).json({ error: "Errore nella decrittazione dei dati: " + err.message });
+    // Recupera la chiave pubblica del servizio
+    const publicKeyString = ca.certificates[serviceName].publicKey;
+    if (!publicKeyString) {
+        return res.status(404).json({ error: "Chiave pubblica non trovata per il servizio" });
     }
-    let storageIV = crypto.randomBytes(16);
-    let storageEncryptedData;
-    let chosenAlias;
-    try {
-        const { storageKeyObj, alias } = chooseStorageKey();
-        chosenAlias = alias; // alias scelto casualmente per questo salvataggio
-        const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(storageKeyObj.key, 'hex'), storageIV);
-        storageEncryptedData = cipher.update(plaintext, 'utf8', 'hex');
-        storageEncryptedData += cipher.final('hex');
-    } catch (err) {
-        return res.status(500).json({ error: "Errore nella cifratura per il DB: " + err.message });
-    }
-    try {
-        const mongoUrl = 'mongodb://localhost:27017/';
-        const dbName = 'sensor_data';
-        const client = new MongoClient(mongoUrl);
-        await client.connect();
-        const db = client.db(dbName);
-        const collection = db.collection(record.collection);
-        await collection.insertOne({
-            serviceId,
-            encryptedData: storageEncryptedData,
-            iv: storageIV.toString('hex'),
-            // Salviamo l'alias scelto in un campo "refCode", in modo da non svelare che si tratta della chiave
-            refCode: chosenAlias,
-            timestamp: new Date()
-        });
-        await client.close();
-        console.log(`✅ Dati inseriti nella collezione ${record.collection} per il servizio ${serviceId}`);
-        return res.json({ success: true, message: "Dati elaborati e memorizzati nel DB" });
-    } catch (err) {
-        return res.status(500).json({ error: "Errore durante l'inserimento nel DB: " + err.message });
+    const key = new NodeRSA(publicKeyString);
+    // Verifica la firma: il client ha firmato il token con la propria chiave privata
+    const isValid = key.verify(token, signature, 'utf8', 'base64');
+    if (isValid) {
+        // Rimuove il token per evitare replay
+        delete ca.pendingTokens[serviceName];
+        console.log(`✅ Autenticazione challenge–response riuscita per ${serviceName}`);
+        return res.json({ authenticated: true });
+    } else {
+        console.error(`❌ Autenticazione challenge–response fallita per ${serviceName}`);
+        return res.status(401).json({ error: "Firma non valida" });
     }
 });
 
-// Endpoint per la richiesta dati (DataDecryption)
+/**
+ * Endpoint per richiedere la chiave privata di un target.
+ * Il richiedente deve inviare: requesterServiceId, requesterPrivateKey e targetServiceId.
+ * Se autenticato, viene restituita la chiave privata del target.
+ */
 app.post('/requestKey', async (req, res) => {
     const { requesterServiceId, requesterPrivateKey, targetServiceId } = req.body;
     if (!requesterServiceId || !requesterPrivateKey || !targetServiceId) {
         return res.status(400).json({ error: "Richiesta incompleta. Campi richiesti: requesterServiceId, requesterPrivateKey, targetServiceId" });
     }
+    // Cerca il servizio richiedente tramite serviceId
     const requester = Object.values(ca.certificates).find(s => s.serviceId === requesterServiceId);
-    if (!requester) return res.status(404).json({ error: "Servizio richiedente non registrato" });
-    if (requester.privateKey !== requesterPrivateKey) return res.status(401).json({ error: "Autenticazione fallita per il richiedente" });
-    const target = Object.values(ca.certificates).find(s => s.serviceId === targetServiceId);
-    if (!target) return res.status(404).json({ error: "Target non registrato" });
-    console.log(`ℹ️ Richiesta dati per il target ${targetServiceId} da ${requesterServiceId}`);
-
-    try {
-        const mongoUrl = 'mongodb://localhost:27017/';
-        const dbName = 'sensor_data';
-        const client = new MongoClient(mongoUrl);
-        await client.connect();
-        const db = client.db(dbName);
-        const collectionsToCheck = ['co2_readings', 'temperature_readings'];
-        let results = [];
-        for (const collectionName of collectionsToCheck) {
-            const collection = db.collection(collectionName);
-            const records = await collection.find({ serviceId: target.serviceId }).toArray();
-            for (const record of records) {
-                try {
-                    // Recupera la storage key cercando l'alias salvato nel campo "refCode"
-                    const storageKeyObj = storageKeys.find(k => k.aliases.includes(record.refCode));
-                    if (!storageKeyObj) throw new Error("Storage key non trovata per refCode " + record.refCode);
-                    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(storageKeyObj.key, 'hex'), Buffer.from(record.iv, 'hex'));
-                    let decrypted = decipher.update(Buffer.from(record.encryptedData, 'hex'), undefined, 'utf8');
-                    decrypted += decipher.final('utf8');
-                    // Ri-encripta i dati con la chiave pubblica del richiedente:
-                    const rsa = new NodeRSA(requester.publicKey);
-                    const encryptedForRequester = rsa.encrypt(decrypted, 'base64');
-                    results.push({
-                        collection: collectionName,
-                        recordId: record._id,
-                        data: encryptedForRequester
-                    });
-                } catch (err) {
-                    console.error("❌ Errore nell'elaborazione del record", record._id, err.message);
-                }
-            }
-        }
-        await client.close();
-        if (results.length === 0) {
-            return res.json({ message: "Nessun record da decriptare per il target specificato." });
-        }
-        return res.json({ data: results });
-    } catch (err) {
-        console.error("❌ Errore nell'elaborazione dati:", err.message);
-        return res.status(500).json({ error: "Errore nell'elaborazione dati: " + err.message });
+    if (!requester) {
+        return res.status(404).json({ error: "Servizio richiedente non registrato" });
     }
+    // Verifica la validità della chiave privata del richiedente (metodo legacy)
+    if (requester.privateKey !== requesterPrivateKey) {
+        return res.status(401).json({ error: "Autenticazione fallita per il richiedente" });
+    }
+    // Cerca il target tramite serviceId
+    const target = Object.values(ca.certificates).find(s => s.serviceId === targetServiceId);
+    if (!target) {
+        return res.status(404).json({ error: "Target non registrato" });
+    }
+    console.log(`ℹ️ Richiesta di chiave privata per il target ${targetServiceId} da parte del richiedente ${requesterServiceId} autenticato.`);
+    // **Attenzione:** Esporre chiavi private è estremamente rischioso in produzione
+    return res.json({ privateKey: target.privateKey });
 });
 
-// Endpoint per ottenere le chiavi (solo per test, non in produzione)
+// Endpoint opzionali per ottenere le chiavi (solo per scopi interni, non in produzione)
 app.get('/publicKey/:serviceName', (req, res) => {
     const serviceName = req.params.serviceName;
-    if (!ca.certificates[serviceName]) return res.status(404).send("Servizio non registrato");
+    if (!ca.certificates[serviceName]) {
+        return res.status(404).send("Servizio non registrato");
+    }
     res.send(ca.certificates[serviceName].publicKey);
 });
+
 app.get('/privateKey/:serviceName', (req, res) => {
     const serviceName = req.params.serviceName;
-    if (!ca.certificates[serviceName]) return res.status(404).send("Servizio non registrato");
-    const key = ca.loadKey(serviceName, 'private');
-    if (!key) return res.status(404).send("Chiave privata non trovata");
-    res.send(key);
+    if (!ca.certificates[serviceName]) {
+        return res.status(404).send("Servizio non registrato");
+    }
+    const privateKey = ca.loadKey(serviceName, 'private');
+    if (!privateKey) {
+        return res.status(404).send("Chiave privata non trovata");
+    }
+    res.send(privateKey);
 });
 
 app.listen(PORT, HOST, () => {
