@@ -1,20 +1,44 @@
-// ca.js
+// CA.js
 const USE_LOCALHOST = false; // Imposta a false per ascoltare su tutte le interfacce
 const HOST = USE_LOCALHOST ? 'localhost' : '0.0.0.0';
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const NodeRSA = require('node-rsa');
-const os = require('os');
 const crypto = require('crypto');
+const https = require('https');
+const selfsigned = require('selfsigned'); // npm install selfsigned
 const app = express();
 const PORT = 3000;
+
+// --- Gestione automatica dei certificati SSL/TLS --- //
+const certsDir = path.join(__dirname, 'certs');
+if (!fs.existsSync(certsDir)) {
+    fs.mkdirSync(certsDir);
+}
+
+const keyPath = path.join(certsDir, 'server.key');
+const certPath = path.join(certsDir, 'server.cert');
+
+if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+    console.log("Certificati SSL/TLS non trovati, genero certificato self-signed...");
+    const attrs = [{ name: 'commonName', value: 'localhost' }];
+    const pems = selfsigned.generate(attrs, { days: 365 });
+    fs.writeFileSync(keyPath, pems.private);
+    fs.writeFileSync(certPath, pems.cert);
+    console.log("Certificati generati in:", certsDir);
+}
+
+const sslOptions = {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath)
+};
+// --- Fine gestione certificati --- //
 
 // Middleware per il parsing del JSON
 app.use(express.json());
 
-// Percorsi dei file per le chiavi
+// Percorsi dei file per le chiavi ECC (salvate in formato esadecimale)
 const PRIVATE_KEYS_FILE = path.join(__dirname, 'private_keys.json');
 const PUBLIC_KEYS_FILE = path.join(__dirname, 'public_keys.json');
 
@@ -24,15 +48,14 @@ const PUBLIC_KEYS_FILE = path.join(__dirname, 'public_keys.json');
  */
 class CertificateAuthority {
     constructor() {
-        // Certificati: chiave = serviceName, valore = { serviceId, owner, description, ipAddress, tailscaleIp, privateKey, publicKey }
+        // certificates: { serviceName: { serviceId, owner, description, ipAddress, tailscaleIp, privateKey, publicKey } }
         this.certificates = {};
-        // Oggetto per memorizzare i token di challenge in attesa di verifica: { serviceName: token }
+        // pendingTokens: { serviceName: token }
         this.pendingTokens = {};
         this._loadCertificates();
     }
 
     _loadCertificates() {
-        // Carica le chiavi private
         if (fs.existsSync(PRIVATE_KEYS_FILE)) {
             try {
                 const privateData = JSON.parse(fs.readFileSync(PRIVATE_KEYS_FILE, 'utf8'));
@@ -43,7 +66,6 @@ class CertificateAuthority {
                 console.error("Errore nel caricare il file delle chiavi private:", e);
             }
         }
-        // Carica le chiavi pubbliche
         if (fs.existsSync(PUBLIC_KEYS_FILE)) {
             try {
                 const publicData = JSON.parse(fs.readFileSync(PUBLIC_KEYS_FILE, 'utf8'));
@@ -58,22 +80,6 @@ class CertificateAuthority {
         }
     }
 
-    // Registra o aggiorna un servizio
-    registerService(serviceInfo, privateKey, publicKey) {
-        this.certificates[serviceInfo.serviceName] = {
-            serviceId: serviceInfo.serviceId,
-            owner: serviceInfo.owner,
-            description: serviceInfo.description,
-            ipAddress: serviceInfo.ipAddress,
-            tailscaleIp: serviceInfo.tailscaleIp,
-            privateKey,
-            publicKey
-        };
-        this._updateKeyFile(PRIVATE_KEYS_FILE, serviceInfo.serviceName, serviceInfo.serviceId, privateKey);
-        this._updateKeyFile(PUBLIC_KEYS_FILE, serviceInfo.serviceName, serviceInfo.serviceId, publicKey);
-    }
-
-    // Aggiorna il file JSON specificato
     _updateKeyFile(filePath, serviceName, serviceId, key) {
         let data = {};
         if (fs.existsSync(filePath)) {
@@ -85,6 +91,21 @@ class CertificateAuthority {
         }
         data[serviceName] = { serviceId, key };
         fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+    }
+
+    // Registra/aggiorna un servizio usando ECC (generando coppia raw tramite ECDH)
+    registerService(serviceInfo, privateKey, publicKey) {
+        this.certificates[serviceInfo.serviceName] = {
+            serviceId: serviceInfo.serviceId,
+            owner: serviceInfo.owner,
+            description: serviceInfo.description,
+            ipAddress: serviceInfo.ipAddress,
+            tailscaleIp: serviceInfo.tailscaleIp,
+            privateKey, // raw in hex
+            publicKey   // raw in hex
+        };
+        this._updateKeyFile(PRIVATE_KEYS_FILE, serviceInfo.serviceName, serviceInfo.serviceId, privateKey);
+        this._updateKeyFile(PUBLIC_KEYS_FILE, serviceInfo.serviceName, serviceInfo.serviceId, publicKey);
     }
 
     // Ritorna la chiave (pubblica o privata) di un servizio
@@ -102,7 +123,7 @@ class CertificateAuthority {
         return null;
     }
 
-    // Autentica un servizio confrontando la chiave privata (metodo legacy usato in /connectionRequest)
+    // Autentica (metodo legacy): confronta la chiave privata
     authenticateService(serviceName, providedPrivateKey) {
         return (
             this.certificates[serviceName] &&
@@ -113,7 +134,6 @@ class CertificateAuthority {
 
 const ca = new CertificateAuthority();
 
-// Interfaccia readline per il prompt di approvazione
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -135,8 +155,9 @@ function askApproval(serviceInfo) {
 }
 
 /**
- * Endpoint per la registrazione/autenticazione del servizio.
- * Se non viene fornita la chiave privata si considera una nuova registrazione.
+ * Endpoint per la registrazione/autenticazione.
+ * Se non viene fornita la chiave privata, si considera una nuova registrazione.
+ * Qui la coppia ECC viene generata tramite ECDH (raw in hex).
  */
 app.post('/connectionRequest', async (req, res) => {
     const serviceInfo = req.body;
@@ -147,30 +168,29 @@ app.post('/connectionRequest', async (req, res) => {
         return res.status(400).json({ error: "Utilizzare l'endpoint /requestKey per richiedere la chiave privata di un target" });
     }
 
-    // Nuova registrazione: il client non invia la chiave privata
     if (!serviceInfo.privateKey) {
-        // Verifica se il serviceId è già presente
         const serviceIdAlreadyExists = Object.values(ca.certificates).some(
             s => s.serviceId === serviceInfo.serviceId
         );
         if (serviceIdAlreadyExists) {
             return res.status(400).json({ error: "Registrazione rifiutata: esiste già un servizio con questo serviceId. Utilizzare il metodo di autenticazione." });
         }
-        // Mostra il prompt per l'approvazione
         const approved = await askApproval(serviceInfo);
         if (approved) {
-            const key = new NodeRSA({ b: 2048 });
-            const privateKey = key.exportKey('private');
-            const publicKey = key.exportKey('public');
+            // Genera coppia ECC tramite ECDH (raw in hex)
+            const ecdh = crypto.createECDH('prime256v1');
+            ecdh.generateKeys();
+            const privateKey = ecdh.getPrivateKey('hex');
+            const publicKey = ecdh.getPublicKey('hex');
             ca.registerService(serviceInfo, privateKey, publicKey);
-            console.log(`✅ Servizio ${serviceInfo.serviceName} registrato con nuove chiavi.`);
+            console.log(`✅ Servizio ${serviceInfo.serviceName} registrato con nuove chiavi ECC.`);
             return res.json({ approved: true, keys: { privateKey, publicKey } });
         } else {
             console.log(`❌ Richiesta di connessione da ${serviceInfo.serviceName} rifiutata dall'utente.`);
             return res.status(400).json({ error: "Registrazione rifiutata dall'utente." });
         }
     } else {
-        // Richiesta di autenticazione legacy: il client invia la chiave privata
+        // Autenticazione legacy
         if (!ca.certificates[serviceInfo.serviceName]) {
             return res.status(404).json({ error: "Servizio non registrato" });
         }
@@ -184,25 +204,23 @@ app.post('/connectionRequest', async (req, res) => {
 });
 
 /**
- * Endpoint per generare un token di challenge per il client.
- * Il client dovrà firmare questo token con la sua chiave privata.
+ * Endpoint per generare un token di challenge.
+ * Il client dovrà calcolare un HMAC del token usando la propria chiave privata (raw).
  */
 app.post('/generateToken', (req, res) => {
     const { serviceName } = req.body;
     if (!serviceName || !ca.certificates[serviceName]) {
         return res.status(404).json({ error: "Servizio non registrato" });
     }
-    // Genera un token casuale
     const token = crypto.randomBytes(32).toString('hex');
-    // Salva il token associato al serviceName
     ca.pendingTokens[serviceName] = token;
     console.log(`🔐 Token generato per ${serviceName}: ${token}`);
     res.json({ token });
 });
 
 /**
- * Endpoint per verificare la firma inviata dal client.
- * Viene usata la chiave pubblica registrata per verificare la firma del token.
+ * Endpoint per verificare l'HMAC inviato dal client.
+ * Il server calcola l'HMAC (sha256) sul token usando la chiave privata (raw) e lo confronta.
  */
 app.post('/authenticate', (req, res) => {
     const { serviceName, signature } = req.body;
@@ -213,55 +231,44 @@ app.post('/authenticate', (req, res) => {
     if (!token) {
         return res.status(400).json({ error: "Token non trovato o scaduto per il servizio" });
     }
-    // Recupera la chiave pubblica del servizio
-    const publicKeyString = ca.certificates[serviceName].publicKey;
-    if (!publicKeyString) {
-        return res.status(404).json({ error: "Chiave pubblica non trovata per il servizio" });
-    }
-    const key = new NodeRSA(publicKeyString);
-    // Verifica la firma: il client ha firmato il token con la propria chiave privata
-    const isValid = key.verify(token, signature, 'utf8', 'base64');
-    if (isValid) {
-        // Rimuove il token per evitare replay
+    const expectedSignature = crypto.createHmac('sha256', Buffer.from(ca.certificates[serviceName].privateKey, 'hex'))
+        .update(token)
+        .digest('hex');
+    if (expectedSignature === signature) {
         delete ca.pendingTokens[serviceName];
         console.log(`✅ Autenticazione challenge–response riuscita per ${serviceName}`);
         return res.json({ authenticated: true });
     } else {
         console.error(`❌ Autenticazione challenge–response fallita per ${serviceName}`);
-        return res.status(401).json({ error: "Firma non valida" });
+        return res.status(401).json({ error: "HMAC non valido" });
     }
 });
 
 /**
  * Endpoint per richiedere la chiave privata di un target.
- * Il richiedente deve inviare: requesterServiceId, requesterPrivateKey e targetServiceId.
- * Se autenticato, viene restituita la chiave privata del target.
+ * (Attenzione: esporre chiavi private è estremamente rischioso in produzione.)
  */
 app.post('/requestKey', async (req, res) => {
     const { requesterServiceId, requesterPrivateKey, targetServiceId } = req.body;
     if (!requesterServiceId || !requesterPrivateKey || !targetServiceId) {
         return res.status(400).json({ error: "Richiesta incompleta. Campi richiesti: requesterServiceId, requesterPrivateKey, targetServiceId" });
     }
-    // Cerca il servizio richiedente tramite serviceId
     const requester = Object.values(ca.certificates).find(s => s.serviceId === requesterServiceId);
     if (!requester) {
         return res.status(404).json({ error: "Servizio richiedente non registrato" });
     }
-    // Verifica la validità della chiave privata del richiedente (metodo legacy)
     if (requester.privateKey !== requesterPrivateKey) {
         return res.status(401).json({ error: "Autenticazione fallita per il richiedente" });
     }
-    // Cerca il target tramite serviceId
     const target = Object.values(ca.certificates).find(s => s.serviceId === targetServiceId);
     if (!target) {
         return res.status(404).json({ error: "Target non registrato" });
     }
     console.log(`ℹ️ Richiesta di chiave privata per il target ${targetServiceId} da parte del richiedente ${requesterServiceId} autenticato.`);
-    // **Attenzione:** Esporre chiavi private è estremamente rischioso in produzione
     return res.json({ privateKey: target.privateKey });
 });
 
-// Endpoint opzionali per ottenere le chiavi (solo per scopi interni, non in produzione)
+// Endpoint per ottenere le chiavi (solo per scopi interni, non in produzione)
 app.get('/publicKey/:serviceName', (req, res) => {
     const serviceName = req.params.serviceName;
     if (!ca.certificates[serviceName]) {
@@ -282,6 +289,7 @@ app.get('/privateKey/:serviceName', (req, res) => {
     res.send(privateKey);
 });
 
-app.listen(PORT, HOST, () => {
-    console.log(`Certificate Authority in ascolto su http://${HOST}:${PORT}`);
+// Avvio del server HTTPS
+https.createServer(sslOptions, app).listen(PORT, HOST, () => {
+    console.log(`Certificate Authority in ascolto su https://${HOST}:${PORT}`);
 });
