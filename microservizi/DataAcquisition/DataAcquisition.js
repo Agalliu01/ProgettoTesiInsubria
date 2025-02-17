@@ -81,9 +81,7 @@ async function requestConnection() {
         ipAddress: ipInfo
     };
 
-    if (localKeysFromFile && localKeysFromFile.privateKey) {
-        requestBody.privateKey = localKeysFromFile.privateKey;
-    }
+
 
     try {
         console.log("🔗 Inviando richiesta di connessione alla CA...");

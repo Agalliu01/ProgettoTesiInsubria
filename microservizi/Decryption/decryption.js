@@ -10,6 +10,7 @@ const KEYS_FILE = './my_keys_decryption.json';
 const mongoUrl = 'mongodb://localhost:27017/';
 const dbName = 'sensor_data';
 const collectionNameCO2 = 'co2_readings';
+const collectionNameTemperature = 'temperature_readings';
 let localKeys = null;
 let keyCache = {}; // Cache per le chiavi private dei target
 
@@ -136,16 +137,36 @@ async function decryptData() {
         await client.connect();
         console.log("✅ Connessione a MongoDB stabilita.");
         const db = client.db(dbName);
-        const collection = db.collection(collectionNameCO2);
-        const records = await collection.find().toArray();
+        const collectionC02 = db.collection(collectionNameCO2);
+        const collectionTemp = db.collection(collectionNameTemperature);
+        const recordsCO2 = await collectionC02.find().toArray();
+        const recordTemp = await collectionTemp.find().toArray();
 
-        if (!records.length) {
+        if (!recordsCO2.length) {
             console.log("⚠️ Nessun dato trovato.");
             await client.close();
             return;
         }
 
-        for (const record of records) {
+        if (!recordTemp.length) {
+            console.log("⚠️ Nessun dato trovato.");
+            await client.close();
+            return;
+        }
+
+
+        // Ciclo per recordsCO2
+        for (const record of recordsCO2) {
+            await decryptRecord(record);
+        }
+
+        // Ciclo per recordTemp
+        for (const record of recordTemp) {
+            await decryptRecord(record);
+        }
+
+
+        async function decryptRecord(record) {
             try {
                 const targetServiceId = record.serviceId;
                 const targetPrivateKey = await getTargetPrivateKey(targetServiceId);
@@ -156,9 +177,9 @@ async function decryptData() {
                 console.log(`✅ Dati decriptati per ${targetServiceId}:`, decrypted);
             } catch (err) {
                 console.error("❌ Errore nella decrittazione del record:", err.message);
-                break;
             }
         }
+
         await client.close();
         console.log("✅ Connessione a MongoDB chiusa.");
     } catch (err) {
@@ -173,7 +194,7 @@ async function main() {
     try {
         const data = await fs.readFile(KEYS_FILE, 'utf8');
         localKeys = JSON.parse(data);
-        console.log("✅ Chiavi locali trovate.");
+        console.log("✅ Chiavi locali trovate.", localKeys);
     } catch (err) {
         console.log("⚠️ Nessun file di chiavi trovato, attendo che la CA mi fornisca le chiavi...");
     }
@@ -189,9 +210,6 @@ async function main() {
         owner: 'Company123',
         ipAddress: ipInfo
     };
-    if (localKeys && localKeys.privateKey) {
-        requestBody.privateKey = localKeys.privateKey;
-    }
 
     try {
         console.log("🔗 Inviando richiesta di connessione alla CA...");

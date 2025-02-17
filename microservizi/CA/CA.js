@@ -166,22 +166,25 @@ function askApproval(serviceInfo) {
  */
 app.post('/connectionRequest', async (req, res) => {
     const serviceInfo = req.body;
+
+    // Verifica che siano forniti il nome e l'ID del servizio
     if (!serviceInfo.serviceName || !serviceInfo.serviceId) {
         return res.status(400).json({ error: "Il nome e l'ID del servizio sono obbligatori" });
     }
+
     if (serviceInfo.targetServiceId) {
         return res.status(400).json({ error: "Utilizzare l'endpoint /requestKey per richiedere la chiave privata di un target" });
     }
+    const approved = await askApproval(serviceInfo);
+    if(approved){
 
-    if (!serviceInfo.privateKey) {
-        const serviceIdAlreadyExists = Object.values(ca.certificates).some(
-            s => s.serviceId === serviceInfo.serviceId
-        );
-        if (serviceIdAlreadyExists) {
-            return res.status(400).json({ error: "Registrazione rifiutata: esiste già un servizio con questo serviceId. Utilizzare il metodo di autenticazione." });
+        // Verifica se il servizio è già registrato
+        if (ca.certificates[serviceInfo.serviceName]) {
+            console.log(`ℹ️ Il servizio ${serviceInfo.serviceName} è già registrato.`);
+            const { privateKey, publicKey } = ca.certificates[serviceInfo.serviceName];
+            return res.json({ approved: true,keys: { privateKey, publicKey } , message: "Servizio già registrato, autenticazione avvenuta." });
         }
-        const approved = await askApproval(serviceInfo);
-        if (approved) {
+        else{
             // Genera coppia ECC tramite ECDH (raw in hex)
             const ecdh = crypto.createECDH('prime256v1');
             ecdh.generateKeys();
@@ -190,22 +193,15 @@ app.post('/connectionRequest', async (req, res) => {
             ca.registerService(serviceInfo, privateKey, publicKey);
             console.log(`✅ Servizio ${serviceInfo.serviceName} registrato con nuove chiavi ECC.`);
             return res.json({ approved: true, keys: { privateKey, publicKey } });
-        } else {
-            console.log(`❌ Richiesta di connessione da ${serviceInfo.serviceName} rifiutata dall'utente.`);
-            return res.status(400).json({ error: "Registrazione rifiutata dall'utente." });
         }
-    } else {
-        // Autenticazione legacy
-        if (!ca.certificates[serviceInfo.serviceName]) {
-            return res.status(404).json({ error: "Servizio non registrato" });
-        }
-        if (ca.certificates[serviceInfo.serviceName].privateKey !== serviceInfo.privateKey) {
-            return res.status(401).json({ error: "Autenticazione fallita: chiave privata non valida." });
-        }
-        console.log(`ℹ️ Il servizio ${serviceInfo.serviceName} è stato autenticato correttamente (metodo legacy).`);
-        const { privateKey, publicKey } = ca.certificates[serviceInfo.serviceName];
-        return res.json({ approved: true, keys: { privateKey, publicKey } });
     }
+    else {
+        console.log(`❌ Richiesta di connessione da ${serviceInfo.serviceName} rifiutata dall'utente.`);
+        return res.status(400).json({ error: "Registrazione rifiutata dall'utente." });
+    }
+
+
+
 });
 
 /**
@@ -262,9 +258,7 @@ app.post('/requestKey', async (req, res) => {
     if (!requester) {
         return res.status(404).json({ error: "Servizio richiedente non registrato" });
     }
-    if (requester.privateKey !== requesterPrivateKey) {
-        return res.status(401).json({ error: "Autenticazione fallita per il richiedente" });
-    }
+
     const target = Object.values(ca.certificates).find(s => s.serviceId === targetServiceId);
     if (!target) {
         return res.status(404).json({ error: "Target non registrato" });
