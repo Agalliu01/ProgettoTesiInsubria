@@ -7,7 +7,7 @@ const path = require('path');
 const readline = require('readline');
 const crypto = require('crypto');
 const https = require('https');
-const selfsigned = require('selfsigned'); // npm install selfsigned
+const { execSync } = require('child_process'); // Per eseguire comandi OpenSSL
 const app = express();
 const PORT = 3000;
 
@@ -21,12 +21,17 @@ const keyPath = path.join(certsDir, 'server.key');
 const certPath = path.join(certsDir, 'server.cert');
 
 if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
-    console.log("Certificati SSL/TLS non trovati, genero certificato self-signed...");
-    const attrs = [{ name: 'commonName', value: 'localhost' }];
-    const pems = selfsigned.generate(attrs, { days: 365 });
-    fs.writeFileSync(keyPath, pems.private);
-    fs.writeFileSync(certPath, pems.cert);
-    console.log("Certificati generati in:", certsDir);
+    console.log("Certificati SSL/TLS non trovati, genero certificato self-signed ECC...");
+    try {
+        // Genera la chiave privata ECC usando la curva prime256v1
+        execSync(`openssl ecparam -name prime256v1 -genkey -noout -out "${keyPath}"`);
+        // Genera il certificato self-signed usando la chiave appena creata; imposta il CN a "localhost"
+        execSync(`openssl req -new -x509 -key "${keyPath}" -out "${certPath}" -days 365 -subj "/CN=localhost"`);
+        console.log("Certificati ECC generati in:", certsDir);
+    } catch (err) {
+        console.error("Errore nella generazione dei certificati ECC tramite OpenSSL:", err);
+        process.exit(1);
+    }
 }
 
 const sslOptions = {
