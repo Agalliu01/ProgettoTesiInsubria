@@ -1,4 +1,3 @@
-// dataAcquisition.js
 const USE_TAILSCALE = false; // true per usare IP Tailscale, false per localhost
 const axios = require('axios');
 const os = require('os');
@@ -15,6 +14,31 @@ const collectionNameCO2 = 'co2_readings';
 const collectionNameTemperature = 'temperature_readings';
 let serviceId = 'DataAcquisition-001';
 
+let localKeys = {};  // conterrà { privateKey, publicKey } in formato hex
+
+// -------------------- MODIFICA AGGIUNTIVA --------------------
+// Funzione per ottenere il certificato pubblico del server e creare un https.Agent
+async function getHttpsAgent() {
+    const certFile = path.join(__dirname, 'server.cert');
+    let caCert;
+    try {
+        caCert = await fs.readFile(certFile, 'utf8');
+    } catch (err) {
+        const ipInfo = os.networkInterfaces();
+        const baseURL = USE_TAILSCALE && getTailscaleIP(ipInfo)
+            ? `https://${getTailscaleIP(ipInfo)}:3000`
+            : 'https://localhost:3000';
+        const url = `${baseURL}/serverCert`;
+        // Inizialmente usiamo rejectUnauthorized false per scaricare il certificato
+        const tempAgent = new (require('https').Agent)({ rejectUnauthorized: false });
+        const response = await axios.get(url, { httpsAgent: tempAgent });
+        caCert = response.data;
+        await fs.writeFile(certFile, caCert);
+    }
+    return new (require('https').Agent)({ ca: caCert });
+}
+// -------------------- FINE MODIFICA --------------------
+
 // Funzione per ottenere l'IP Tailscale o localhost
 function getTailscaleIP(ipInfo) {
     for (const iface in ipInfo) {
@@ -28,8 +52,6 @@ function getTailscaleIP(ipInfo) {
     }
     return null;
 }
-
-let localKeys = {};  // conterrà { privateKey, publicKey } in formato hex
 
 /**
  * Funzione che cifra la chiave AES usando ECIES (ECDH + AES-256-CBC)
@@ -81,21 +103,25 @@ async function requestConnection() {
         ipAddress: ipInfo
     };
 
-
-
     try {
         console.log("🔗 Inviando richiesta di connessione alla CA...");
+        const httpsAgent = await getHttpsAgent();
         const response = await axios.post(url, requestBody, {
             timeout: 10000,
-            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+            httpsAgent
         });
         if (response.data.approved) {
             console.log("✅ Connessione approvata/verificata dalla CA");
             if (response.data.keys) {
-                await fs.writeFile(KEYS_FILE, JSON.stringify(response.data.keys, null, 2));
+                let receivedKeys = response.data.keys;
+                // Se la risposta non contiene la chiave privata, manteniamola da file (caso già registrato)
+                if (!receivedKeys.privateKey && localKeysFromFile && localKeysFromFile.privateKey) {
+                    receivedKeys.privateKey = localKeysFromFile.privateKey;
+                }
+                await fs.writeFile(KEYS_FILE, JSON.stringify(receivedKeys, null, 2));
                 console.log("🔑 Chiavi ricevute dalla CA e salvate in", KEYS_FILE);
-                serviceId = response.data.keys.serviceId || serviceId;
-                localKeys = response.data.keys;
+                serviceId = receivedKeys.serviceId || serviceId;
+                localKeys = receivedKeys;
                 // Avvia il challenge–response per autenticarsi
                 authenticateClient(localKeys);
             } else {
@@ -126,11 +152,12 @@ async function authenticateClient(localKeys) {
         : 'https://localhost:3000';
 
     try {
+        const httpsAgent = await getHttpsAgent();
         const tokenResponse = await axios.post(`${baseURL}/generateToken`, {
             serviceName: 'DataAcquisition'
         }, {
             timeout: 10000,
-            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+            httpsAgent
         });
         const token = tokenResponse.data.token;
         console.log(`🔑 Token ricevuto: ${token}`);
@@ -145,7 +172,7 @@ async function authenticateClient(localKeys) {
             signature
         }, {
             timeout: 10000,
-            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+            httpsAgent
         });
 
         if (authResponse.data.authenticated) {
@@ -189,9 +216,8 @@ async function processFiles() {
         const baseURL = USE_TAILSCALE && getTailscaleIP(ipInfo)
             ? `https://${getTailscaleIP(ipInfo)}:3000`
             : 'https://localhost:3000';
-        const publicKeyResponse = await axios.get(`${baseURL}/publicKey/DataAcquisition`, {
-            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
-        });
+        const httpsAgent = await getHttpsAgent();
+        const publicKeyResponse = await axios.get(`${baseURL}/publicKey/DataAcquisition`, { httpsAgent });
         const recipientPublicKey = publicKeyResponse.data; // hex string
 
         let indexCO2 = 0, indexTemp = 0;

@@ -1,4 +1,3 @@
-// dataDecryption.js
 const USE_TAILSCALE = false; // true per usare IP Tailscale, false per localhost
 const axios = require('axios');
 const os = require('os');
@@ -14,6 +13,29 @@ const collectionNameTemperature = 'temperature_readings';
 let localKeys = null;
 let keyCache = {}; // Cache per le chiavi private dei target
 
+// -------------------- MODIFICA AGGIUNTIVA --------------------
+// Funzione per ottenere il certificato pubblico del server e creare un https.Agent
+async function getHttpsAgent() {
+    const certFile = path.join(__dirname, 'server.cert');
+    let caCert;
+    try {
+        caCert = await fs.readFile(certFile, 'utf8');
+    } catch (err) {
+        const ipInfo = os.networkInterfaces();
+        const baseURL = USE_TAILSCALE && getTailscaleIP(ipInfo)
+            ? `https://${getTailscaleIP(ipInfo)}:3000`
+            : 'https://localhost:3000';
+        const url = `${baseURL}/serverCert`;
+        const tempAgent = new (require('https').Agent)({ rejectUnauthorized: false });
+        const response = await axios.get(url, { httpsAgent: tempAgent });
+        caCert = response.data;
+        await fs.writeFile(certFile, caCert);
+    }
+    return new (require('https').Agent)({ ca: caCert });
+}
+// -------------------- FINE MODIFICA --------------------
+
+// Funzione per ottenere l'IP Tailscale o localhost
 function getTailscaleIP(ipInfo) {
     for (const iface in ipInfo) {
         if (iface.toLowerCase().includes('tailscale')) {
@@ -56,11 +78,12 @@ async function authenticateClient() {
         : 'https://localhost:3000';
 
     try {
+        const httpsAgent = await getHttpsAgent();
         const tokenResponse = await axios.post(`${baseURL}/generateToken`, {
             serviceName: 'DataDecryption'
         }, {
             timeout: 10000,
-            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+            httpsAgent
         });
         const token = tokenResponse.data.token;
         console.log(`🔑 Token ricevuto: ${token}`);
@@ -75,7 +98,7 @@ async function authenticateClient() {
             signature
         }, {
             timeout: 10000,
-            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+            httpsAgent
         });
 
         if (authResponse.data.authenticated) {
@@ -105,13 +128,14 @@ async function getTargetPrivateKey(targetServiceId) {
             ? `https://${getTailscaleIP(ipInfo)}:3000`
             : 'https://localhost:3000';
         const url = `${baseURL}/requestKey`;
+        const httpsAgent = await getHttpsAgent();
         const response = await axios.post(url, {
             requesterServiceId: 'DataDecryption-001',
             requesterPrivateKey: localKeys.privateKey,
             targetServiceId
         }, {
             timeout: 10000,
-            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+            httpsAgent
         });
         if (response.data && response.data.privateKey) {
             console.log(`✅ Chiave privata ricevuta per il target ${targetServiceId}.`);
@@ -154,7 +178,6 @@ async function decryptData() {
             return;
         }
 
-
         // Ciclo per recordsCO2
         for (const record of recordsCO2) {
             await decryptRecord(record);
@@ -164,7 +187,6 @@ async function decryptData() {
         for (const record of recordTemp) {
             await decryptRecord(record);
         }
-
 
         async function decryptRecord(record) {
             try {
@@ -213,13 +235,19 @@ async function main() {
 
     try {
         console.log("🔗 Inviando richiesta di connessione alla CA...");
+        const httpsAgent = await getHttpsAgent();
         const response = await axios.post(url, requestBody, {
             timeout: 10000,
-            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+            httpsAgent
         });
         console.log("✅ Risposta della CA ricevuta.");
         if (response.data.approved && response.data.keys) {
-            localKeys = response.data.keys;
+            let receivedKeys = response.data.keys;
+            // Se la risposta non contiene la chiave privata, manteniamola da file (se già presente)
+            if (!receivedKeys.privateKey && localKeys && localKeys.privateKey) {
+                receivedKeys.privateKey = localKeys.privateKey;
+            }
+            localKeys = receivedKeys;
             await fs.writeFile(KEYS_FILE, JSON.stringify(localKeys, null, 2));
             console.log("🔑 Chiavi ricevute dalla CA e salvate in", KEYS_FILE);
             await authenticateClient();

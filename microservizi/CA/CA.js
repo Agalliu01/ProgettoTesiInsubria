@@ -1,4 +1,5 @@
 // CA.js
+
 const USE_LOCALHOST = false; // Imposta a false per ascoltare su tutte le interfacce
 const HOST = USE_LOCALHOST ? 'localhost' : '0.0.0.0';
 const express = require('express');
@@ -161,8 +162,9 @@ function askApproval(serviceInfo) {
 
 /**
  * Endpoint per la registrazione/autenticazione.
- * Se non viene fornita la chiave privata, si considera una nuova registrazione.
- * Qui la coppia ECC viene generata tramite ECDH (raw in hex).
+ * Se il servizio non è registrato (registrazione) la CA genera la coppia ECC e
+ * invia **entrambe** le chiavi (caso 1 consentito).
+ * Se il servizio è già registrato (autenticazione) la risposta include **solo** la chiave pubblica.
  */
 app.post('/connectionRequest', async (req, res) => {
     const serviceInfo = req.body;
@@ -175,16 +177,20 @@ app.post('/connectionRequest', async (req, res) => {
     if (serviceInfo.targetServiceId) {
         return res.status(400).json({ error: "Utilizzare l'endpoint /requestKey per richiedere la chiave privata di un target" });
     }
-    const approved = await askApproval(serviceInfo);
-    if(approved){
 
-        // Verifica se il servizio è già registrato
-        if (ca.certificates[serviceInfo.serviceName]) {
-            console.log(`ℹ️ Il servizio ${serviceInfo.serviceName} è già registrato.`);
-            const { privateKey, publicKey } = ca.certificates[serviceInfo.serviceName];
-            return res.json({ approved: true,keys: { privateKey, publicKey } , message: "Servizio già registrato, autenticazione avvenuta." });
-        }
-        else{
+    // Se il servizio è già registrato, esegue l'autenticazione automatica senza richiesta interattiva
+    if (ca.certificates[serviceInfo.serviceName]) {
+        console.log(`ℹ️ Il servizio ${serviceInfo.serviceName} è già registrato (autenticazione automatica).`);
+        const { publicKey } = ca.certificates[serviceInfo.serviceName];
+        return res.json({
+            approved: true,
+            keys: { publicKey },
+            message: "Servizio già registrato, autenticazione automatica."
+        });
+    } else {
+        // Per i servizi non registrati, chiede l'approvazione interattiva come da requisito
+        const approved = await askApproval(serviceInfo);
+        if (approved) {
             // Genera coppia ECC tramite ECDH (raw in hex)
             const ecdh = crypto.createECDH('prime256v1');
             ecdh.generateKeys();
@@ -193,16 +199,13 @@ app.post('/connectionRequest', async (req, res) => {
             ca.registerService(serviceInfo, privateKey, publicKey);
             console.log(`✅ Servizio ${serviceInfo.serviceName} registrato con nuove chiavi ECC.`);
             return res.json({ approved: true, keys: { privateKey, publicKey } });
+        } else {
+            console.log(`❌ Richiesta di connessione da ${serviceInfo.serviceName} rifiutata dall'utente.`);
+            return res.status(400).json({ error: "Registrazione rifiutata dall'utente." });
         }
     }
-    else {
-        console.log(`❌ Richiesta di connessione da ${serviceInfo.serviceName} rifiutata dall'utente.`);
-        return res.status(400).json({ error: "Registrazione rifiutata dall'utente." });
-    }
-
-
-
 });
+
 
 /**
  * Endpoint per generare un token di challenge.
@@ -248,6 +251,7 @@ app.post('/authenticate', (req, res) => {
 /**
  * Endpoint per richiedere la chiave privata di un target.
  * (Attenzione: esporre chiavi private è estremamente rischioso in produzione.)
+ * Questo endpoint è abilitato in quanto rientra nel caso 2 consentito.
  */
 app.post('/requestKey', async (req, res) => {
     const { requesterServiceId, requesterPrivateKey, targetServiceId } = req.body;
@@ -258,7 +262,6 @@ app.post('/requestKey', async (req, res) => {
     if (!requester) {
         return res.status(404).json({ error: "Servizio richiedente non registrato" });
     }
-
     const target = Object.values(ca.certificates).find(s => s.serviceId === targetServiceId);
     if (!target) {
         return res.status(404).json({ error: "Target non registrato" });
@@ -267,7 +270,10 @@ app.post('/requestKey', async (req, res) => {
     return res.json({ privateKey: target.privateKey });
 });
 
-// Endpoint per ottenere le chiavi (solo per scopi interni, non in produzione)
+/**
+ * Endpoint per ottenere la chiave pubblica di un servizio.
+ * Utile per servizi che necessitano di conoscere la chiave pubblica di un altro.
+ */
 app.get('/publicKey/:serviceName', (req, res) => {
     const serviceName = req.params.serviceName;
     if (!ca.certificates[serviceName]) {
@@ -276,17 +282,15 @@ app.get('/publicKey/:serviceName', (req, res) => {
     res.send(ca.certificates[serviceName].publicKey);
 });
 
-app.get('/privateKey/:serviceName', (req, res) => {
-    const serviceName = req.params.serviceName;
-    if (!ca.certificates[serviceName]) {
-        return res.status(404).send("Servizio non registrato");
-    }
-    const privateKey = ca.loadKey(serviceName, 'private');
-    if (!privateKey) {
-        return res.status(404).send("Chiave privata non trovata");
-    }
-    res.send(privateKey);
+/**
+ * Endpoint per ottenere il certificato pubblico del server.
+ * I client possono utilizzarlo per autenticare il server durante la connessione HTTPS.
+ */
+app.get('/serverCert', (req, res) => {
+    res.type('pem').send(fs.readFileSync(certPath, 'utf8'));
 });
+
+// NOTA: L'endpoint per ottenere la chiave privata tramite GET è stato **rimosso** per non esporre dati sensibili
 
 // Avvio del server HTTPS
 https.createServer(sslOptions, app).listen(PORT, HOST, () => {
