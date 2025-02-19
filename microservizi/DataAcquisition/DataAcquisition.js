@@ -1,4 +1,4 @@
-const USE_TAILSCALE = false; // true per usare IP Tailscale, false per localhost
+const USE_TAILSCALE = true; // true per usare IP Tailscale, false per localhost
 const axios = require('axios');
 const os = require('os');
 const fs = require('fs').promises;
@@ -6,7 +6,9 @@ const crypto = require('crypto');
 const path = require('path');
 
 const KEYS_FILE = './my_keys.json';
-const mongoUrl = 'mongodb://localhost:27017/';
+//const mongoUrl = 'mongodb://localhost:27017/';
+const mongoUrl = 'mongodb://admin:password@100.116.74.57:27017/admin?tls=true&tlsCertificateKeyFile=C:\\Users\\capit\\Documents\\ProgettoTesiInsubria\\microservizi\\DataAcquisition\\mongodb.pem&tlsCAFile=C:\\Users\\capit\\Documents\\ProgettoTesiInsubria\\microservizi\\DataAcquisition\\mongodb.pem';
+
 const dbName = 'sensor_data';
 const filePathCO2 = '../DataCO2_Adeunis';
 const filePathTemperature = '../DataTemperature_Adeunis';
@@ -19,7 +21,7 @@ let localKeys = {};  // conterrà { privateKey, publicKey } in formato hex
 // -------------------- MODIFICA AGGIUNTIVA --------------------
 // Funzione per ottenere il certificato pubblico del server e creare un https.Agent
 async function getHttpsAgent() {
-    const certFile = path.join(__dirname, 'server.cert');
+    const certFile = path.join(__dirname, 'mongodb.pem');
     let caCert;
     try {
         caCert = await fs.readFile(certFile, 'utf8');

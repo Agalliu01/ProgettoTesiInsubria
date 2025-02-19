@@ -1,4 +1,4 @@
-const USE_TAILSCALE = false; // true per usare IP Tailscale, false per localhost
+const USE_TAILSCALE = true; // true per usare IP Tailscale, false per localhost
 const axios = require('axios');
 const os = require('os');
 const fs = require('fs').promises;
@@ -6,7 +6,8 @@ const crypto = require('crypto');
 const path = require('path');
 
 const KEYS_FILE = './my_keys_decryption.json';
-const mongoUrl = 'mongodb://localhost:27017/';
+//const mongoUrl = 'mongodb://localhost:27017/';
+const mongoUrl = 'mongodb://admin:password@100.116.74.57:27017/admin?tls=true&tlsCertificateKeyFile=C:\\Users\\capit\\Documents\\ProgettoTesiInsubria\\microservizi\\Decryption\\mongodb.pem&tlsCAFile=C:\\Users\\capit\\Documents\\ProgettoTesiInsubria\\microservizi\\Decryption\\mongodb.pem';
 const dbName = 'sensor_data';
 const collectionNameCO2 = 'co2_readings';
 const collectionNameTemperature = 'temperature_readings';
